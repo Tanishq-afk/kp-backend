@@ -62,13 +62,24 @@ export const PRINT_STATUS = ['pending', 'printed'];
 export const PAYMENT_STATUS = ['paid', 'partial', 'unpaid'];
 // 'held' = a parked/in-progress bill, set aside to serve another customer and
 // resumed later. It has no invoice number and no stock impact until completed.
+// 'refunded' = every sold unit on the bill has since been returned.
 export const BILL_STATUS = ['held', 'completed', 'cancelled', 'refunded'];
+
+// ---- Returns / exchanges --------------------------------------------------
+// A return record is created atomically and is otherwise immutable ('void' is
+// reserved for a future cancel-a-return flow).
+export const RETURN_STATUS = ['completed', 'void'];
+// How the net of an exchange settles: 'collect' = customer owes money (new items
+// cost more than the return credit), 'refund' = shop pays money back, 'even' = no
+// cash moves (credit exactly covers the new items).
+export const SETTLEMENT_DIRECTIONS = ['collect', 'refund', 'even'];
 
 // ---- Counter keys (atomic sequences) --------------------------------------
 export const COUNTER = {
   BILL: 'bill',
   BARCODE: 'barcode',
   HOLD: 'hold',
+  RETURN: 'return',
 };
 
 // ---- Reporting -------------------------------------------------------------

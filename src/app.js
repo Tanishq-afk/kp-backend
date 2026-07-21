@@ -11,6 +11,7 @@ import productRoutes from './routes/product.routes.js';
 import barcodeRoutes from './routes/barcode.routes.js';
 import customerRoutes from './routes/customer.routes.js';
 import billingRoutes from './routes/billing.routes.js';
+import returnRoutes from './routes/return.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
 
 // Builds and configures the Express app. Route modules are mounted under /api
@@ -60,6 +61,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/barcodes', barcodeRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/bills', billingRoutes);
+app.use('/api/returns', returnRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 // (more route modules mounted here in later phases)
 

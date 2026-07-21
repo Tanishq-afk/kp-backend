@@ -53,6 +53,7 @@ kp-backend/
       Barcode.js         # ONE doc per physical unit
       Customer.js        # customers (linked from Bill)
       Bill.js            # sales / invoices (split payments)
+      Return.js          # sales returns / exchanges (credit notes)
       Counter.js         # atomic sequence store
     controllers/
       auth.controller.js # login / register / me (thin; delegate to services)
@@ -145,10 +146,27 @@ parked bills), `customer` (ref, nullable) + `customerName`/`customerPhone`
 `amountPaid`, `changeReturned`, `paymentStatus` (`paid`|`partial`|`unpaid`),
 `remarks`, `createdBy` (admin).
 - `billNumber` is required only when `status === 'completed'`.
+- `appliedCredit` (₹ return credit tendered — nonzero only on the buy leg of an
+  exchange; counts toward `amountPaid`) + `returnRef` (the Return it settled against).
+- `status` becomes `refunded` once every sold unit on the bill has been returned.
+
+### Return  (sales return / exchange — "credit note")
+`returnNumber` (`RET-000001`, counter-backed), `originalBill` (ref) +
+`originalBillNumber`, `customer` (ref, nullable) + `customerName`/`customerPhone`
+(snapshots, inherited from the bill unless overridden),
+`items: [{ barcode (the returned unit), product, productName, articleNumber, size,
+mrp, refundAmount, resellable, newBarcode }]`, `refundTotal` (Σ refundAmount),
+`exchangeBill` (ref, nullable) + `exchangeTotal`, `netAmount`
+(`exchangeTotal − refundTotal`; >0 collect, <0 refund),
+`settlement: { direction (collect|refund|even), amount, payments[] }`,
+`remarks`, `status` (`completed`|`void`), `createdBy` (admin).
+- `refundAmount` = the unit's effective price paid = `round(bill.total × mrp / bill.subtotal)`.
+- `resellable` items are restocked and get a freshly minted `newBarcode` (the old
+  label may be lost); the original barcode is retired to `returned` either way.
 
 ### Counter
 `{ _id: <name>, seq: <number> }`. Mutated only via `$inc` through
-`utils/sequence.js`. Keys: `bill`, `barcode`.
+`utils/sequence.js`. Keys: `bill`, `barcode`, `hold`, `return`.
 
 ## 7. Barcode Generation Flow
 
@@ -228,6 +246,33 @@ customer first, then resume it.
   (`discountType` / `discountValue` / `discount`), tax, payments, and customer — so
   clicking a history row shows the complete original bill.
 
+## 9.1 Sales Returns & Exchanges
+
+A customer comes back with items from a past bill. The admin:
+1. **Looks the bill up** by bill number or customer phone (`GET /api/returns/lookup`)
+   → a summary list of that number's completed bills to match by date/number.
+2. **Opens a bill** (`GET /api/returns/bill/:billId`) → its items, each annotated with
+   `returnable` (its unit is still `sold` on this bill) and the per-unit `refundAmount`
+   (effective price paid — the unit's MRP share of the bill total, so any bill discount
+   is refunded proportionally).
+3. **Selects units to return**, marking each **resellable** (default) or **damaged**, and
+   may **scan new items** to buy in the same flow (an exchange).
+4. **Submits** (`POST /api/returns`) — everything below runs in **one transaction**:
+   - Each returned unit's original barcode is retired to `returned`. **Resellable** units
+     are restocked (`currentStock` +1) and get a **freshly minted, re-printable barcode**
+     (the old label may be lost); **damaged** units are not restocked.
+   - If new items were scanned, they are sold as a **normal completed Bill** (invoice no.,
+     units `sold`, stock decremented). The return credit is applied to it as `appliedCredit`,
+     so it reads as fully paid; only the **net** is collected in cash/card/upi.
+   - **Net = exchangeTotal − refundTotal.** `>0` → customer pays (money sits on the exchange
+     bill); `<0` → shop refunds (money recorded on the return's `settlement.payments`);
+     `0` → even. A pure return (no new items) simply refunds `refundTotal`.
+   - When the **last** sold unit of the original bill is returned, that bill flips to `refunded`.
+- Returnability is derived from barcode status, so **partial and repeat returns** just work
+  (a returned unit can't be returned again → 409).
+- **Reports:** the superadmin dashboard nets returns out — `summary` gains `totals.netRevenue`
+  + a `returns` block, and `sales/daily` carries per-day `refunds`/`netRevenue`.
+
 ## 10. API Conventions (for later phases)
 
 - Base path: `/api`. Health check: `GET /health`.
@@ -271,7 +316,13 @@ DELETE /api/bills/:id            (admin) discard a held bill (held only)
 GET    /api/bills                (auth)  history (status/payment/date/search) + pagination
 GET    /api/bills/:id            (auth)  full bill (items, discount, payments, customer)
 
-GET    /api/dashboard/summary                  (superadmin) KPIs + today + counts
+GET    /api/returns/lookup       (admin) completed bills by billNumber/phone (+date) + pagination
+GET    /api/returns/bill/:billId (admin) bill items annotated {returnable, refundAmount}
+POST   /api/returns              (admin) create a return / exchange (atomic)
+GET    /api/returns              (auth)  returns history (date/search) + pagination
+GET    /api/returns/:id          (auth)  full return (items, refund, exchange, settlement)
+
+GET    /api/dashboard/summary                  (superadmin) KPIs + today + counts + returns
 GET    /api/dashboard/sales/daily              (superadmin) day-wise series (IST, gap-filled)
 GET    /api/dashboard/sales/payment-methods    (superadmin) pie: cash/card/upi
 GET    /api/dashboard/sales/top-products       (superadmin) best sellers
@@ -331,4 +382,8 @@ billNumber.
 7. ✅ **Dashboard/reports (superadmin):** summary KPIs (+ today + counts),
    **day-wise sales** (IST buckets, gap-filled), payment-method & category pies,
    top products. All optional `from`/`to` date range. Sales = completed bills.
-8. ⬜ **Frontend (React + MUI).**
+8. ✅ **Sales returns / exchanges:** look a bill up by number/phone → pick units to
+   return (resellable ↦ restock + fresh barcode; damaged ↦ retire) → optionally scan
+   new items and settle the net in one transaction. Refund = effective price paid;
+   full return flips the bill to `refunded`; reports net returns out.
+9. ⬜ **Frontend (React + MUI).**

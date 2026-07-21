@@ -89,7 +89,19 @@ const billSchema = new mongoose.Schema(
     total: { type: Number, required: true, min: 0 }, // subtotal - discount + tax
     // ---- split payments ----
     payments: { type: [paymentSchema], default: [] },
-    amountPaid: { type: Number, default: 0, min: 0 }, // sum of payments
+    // Return credit tendered toward this bill when it is the "buy" leg of an
+    // exchange (see the Return model). Counts toward amountPaid alongside the
+    // real payments, so an exchange bill still reads as fully paid even though
+    // the customer only handed over the net difference in cash/card/upi.
+    appliedCredit: { type: Number, default: 0, min: 0 },
+    // Set when this bill was created as the exchange (new-purchase) leg of a
+    // return, linking back to that return record.
+    returnRef: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Return',
+      default: null,
+    },
+    amountPaid: { type: Number, default: 0, min: 0 }, // sum of payments + appliedCredit
     changeReturned: { type: Number, default: 0, min: 0 },
     paymentStatus: {
       type: String,

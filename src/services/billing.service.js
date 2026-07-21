@@ -8,7 +8,7 @@ import { getNextSequence } from '../utils/sequence.js';
 import { getPagination, buildPage } from '../utils/paginate.js';
 import { upsertByPhone } from './customer.service.js';
 
-const formatBillNumber = (seq) => `INV-${String(seq).padStart(6, '0')}`;
+export const formatBillNumber = (seq) => `INV-${String(seq).padStart(6, '0')}`;
 
 // Map a barcode doc to a bill line item (snapshots so history stays accurate).
 const toItem = (b) => ({
@@ -22,7 +22,7 @@ const toItem = (b) => ({
 
 // Resolve scanned codes -> validated, available barcode docs (in scan order).
 // Optionally bound to a transaction session for race-free re-validation.
-const resolveByCodes = async (codes, session) => {
+export const resolveByCodes = async (codes, session) => {
   if (!Array.isArray(codes) || codes.length === 0) {
     throw new ApiError(400, 'Scan at least one barcode.');
   }
@@ -66,8 +66,17 @@ const resolveByIds = async (ids, session) => {
   return { items: found.map(toItem), barcodeDocs: found };
 };
 
-// Compute money fields from items + discount/tax/payments.
-const computeAmounts = ({ items, discountType = 'flat', discountValue = 0, tax = 0, payments = [] }) => {
+// Compute money fields from items + discount/tax/payments. `appliedCredit` is
+// return-credit tendered toward the bill (0 for a normal sale); it counts toward
+// amountPaid alongside real payments so an exchange bill reads as fully paid.
+export const computeAmounts = ({
+  items,
+  discountType = 'flat',
+  discountValue = 0,
+  tax = 0,
+  payments = [],
+  appliedCredit = 0,
+}) => {
   const subtotal = items.reduce((s, it) => s + it.mrp, 0);
 
   let discount =
@@ -78,7 +87,8 @@ const computeAmounts = ({ items, discountType = 'flat', discountValue = 0, tax =
 
   const taxAmt = Number(tax) || 0;
   const total = Math.max(0, subtotal - discount + taxAmt);
-  const amountPaid = (payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const paid = (payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const amountPaid = paid + (Number(appliedCredit) || 0);
   const changeReturned = Math.max(0, amountPaid - total);
 
   let paymentStatus = 'unpaid';
@@ -89,7 +99,7 @@ const computeAmounts = ({ items, discountType = 'flat', discountValue = 0, tax =
 };
 
 // Find-or-create the customer when name+number are entered at the counter.
-const resolveCustomer = async (customer, user) => {
+export const resolveCustomer = async (customer, user) => {
   if (!customer) return null;
   if (!customer.name || !customer.phone) {
     throw new ApiError(400, 'Customer requires both a name and a phone number.');
@@ -98,7 +108,7 @@ const resolveCustomer = async (customer, user) => {
 };
 
 // Mark sold + stamp the bill on every billed unit.
-const markSold = async (barcodeDocs, billId, session) => {
+export const markSold = async (barcodeDocs, billId, session) => {
   const ids = barcodeDocs.map((b) => b._id);
   await Barcode.updateMany(
     { _id: { $in: ids } },
@@ -108,7 +118,7 @@ const markSold = async (barcodeDocs, billId, session) => {
 };
 
 // Decrement each product's live stock by how many of its units were sold.
-const decrementStock = async (items, session) => {
+export const decrementStock = async (items, session) => {
   const counts = new Map();
   for (const it of items) {
     const key = String(it.product);
@@ -139,6 +149,39 @@ const buildBillFields = (payload, items, amounts, customer, user) => ({
   createdBy: user._id,
 });
 
+// The transactional core of a completed sale, bound to an existing session so it
+// can join a larger transaction (e.g. the exchange leg of a return). Validates
+// scans, assigns the invoice number, marks units sold, and decrements stock.
+// `appliedCredit` / `returnRef` link the sale to a return that funded part of it.
+export const completeSaleInSession = async (
+  payload,
+  customer,
+  session,
+  user,
+  { appliedCredit = 0, returnRef = null } = {}
+) => {
+  const { items, barcodeDocs } = await resolveByCodes(payload.barcodes, session);
+  const amounts = computeAmounts({ items, ...payload, appliedCredit });
+  const seq = await getNextSequence(COUNTER.BILL, { session });
+
+  const [bill] = await Bill.create(
+    [
+      {
+        billNumber: formatBillNumber(seq),
+        status: 'completed',
+        appliedCredit,
+        returnRef,
+        ...buildBillFields(payload, items, amounts, customer, user),
+      },
+    ],
+    { session }
+  );
+
+  await markSold(barcodeDocs, bill._id, session);
+  await decrementStock(items, session);
+  return bill;
+};
+
 // Create AND complete a sale in one transaction: validate scans, build the bill,
 // assign the invoice number, mark units sold, and decrement stock — atomically.
 export const createBill = async (payload, user) => {
@@ -148,18 +191,8 @@ export const createBill = async (payload, user) => {
   let billId;
   try {
     await session.withTransaction(async () => {
-      const { items, barcodeDocs } = await resolveByCodes(payload.barcodes, session);
-      const amounts = computeAmounts({ items, ...payload });
-      const seq = await getNextSequence(COUNTER.BILL, { session });
-
-      const [bill] = await Bill.create(
-        [{ billNumber: formatBillNumber(seq), status: 'completed', ...buildBillFields(payload, items, amounts, customer, user) }],
-        { session }
-      );
+      const bill = await completeSaleInSession(payload, customer, session, user);
       billId = bill._id;
-
-      await markSold(barcodeDocs, bill._id, session);
-      await decrementStock(items, session);
     });
   } finally {
     await session.endSession();

@@ -2,6 +2,7 @@ import Bill from '../models/Bill.js';
 import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
+import Return from '../models/Return.js';
 import { REPORT_TIMEZONE, ROLE } from '../config/constants.js';
 
 // ---- IST day helpers -------------------------------------------------------
@@ -30,39 +31,85 @@ const salesMatch = (query = {}) => {
   return match;
 };
 
+// Match clause: return records within the same optional IST date range.
+const returnMatch = (query = {}) => {
+  const match = {};
+  if (query.from || query.to) {
+    match.createdAt = {};
+    if (query.from) match.createdAt.$gte = istDayStart(query.from);
+    if (query.to) match.createdAt.$lte = istDayEnd(query.to);
+  }
+  return match;
+};
+
 const ZERO_TOTALS = { revenue: 0, bills: 0, itemsSold: 0, discountGiven: 0, taxCollected: 0 };
 
 // KPI cards: totals over the range, a "today" snapshot, and live counts.
 export const getSummary = async (query) => {
   const match = salesMatch(query);
 
-  const [totalsAgg, todayAgg, products, customers, activeAdmins, heldBills] = await Promise.all([
-    Bill.aggregate([
-      { $match: match },
-      {
-        $group: {
-          _id: null,
-          revenue: { $sum: '$total' },
-          bills: { $sum: 1 },
-          itemsSold: { $sum: { $size: '$items' } },
-          discountGiven: { $sum: '$discount' },
-          taxCollected: { $sum: '$tax' },
+  const [totalsAgg, todayAgg, returnsAgg, todayReturnsAgg, products, customers, activeAdmins, heldBills] =
+    await Promise.all([
+      Bill.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: '$total' },
+            bills: { $sum: 1 },
+            itemsSold: { $sum: { $size: '$items' } },
+            discountGiven: { $sum: '$discount' },
+            taxCollected: { $sum: '$tax' },
+          },
         },
-      },
-    ]),
-    Bill.aggregate([
-      { $match: { status: 'completed', createdAt: { $gte: istDayStart() } } },
-      { $group: { _id: null, revenue: { $sum: '$total' }, bills: { $sum: 1 } } },
-    ]),
-    Product.countDocuments({ isActive: true }),
-    Customer.countDocuments({}),
-    User.countDocuments({ role: ROLE.ADMIN, isActive: true }),
-    Bill.countDocuments({ status: 'held' }),
-  ]);
+      ]),
+      Bill.aggregate([
+        { $match: { status: 'completed', createdAt: { $gte: istDayStart() } } },
+        { $group: { _id: null, revenue: { $sum: '$total' }, bills: { $sum: 1 } } },
+      ]),
+      // Returns in range. `refundImpact` = refunds against bills that are STILL
+      // 'completed' (i.e. still counted in revenue above); a fully-returned bill
+      // flips to 'refunded' and already drops out of revenue, so its refund must
+      // NOT be subtracted again. netRevenue = revenue - refundImpact stays consistent.
+      Return.aggregate([
+        { $match: returnMatch(query) },
+        { $lookup: { from: 'bills', localField: 'originalBill', foreignField: '_id', as: 'ob' } },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            refundTotal: { $sum: '$refundTotal' },
+            refundImpact: {
+              $sum: {
+                $cond: [{ $eq: [{ $arrayElemAt: ['$ob.status', 0] }, 'completed'] }, '$refundTotal', 0],
+              },
+            },
+          },
+        },
+      ]),
+      Return.aggregate([
+        { $match: { createdAt: { $gte: istDayStart() } } },
+        { $group: { _id: null, refundTotal: { $sum: '$refundTotal' } } },
+      ]),
+      Product.countDocuments({ isActive: true }),
+      Customer.countDocuments({}),
+      User.countDocuments({ role: ROLE.ADMIN, isActive: true }),
+      Bill.countDocuments({ status: 'held' }),
+    ]);
 
   const totals = { ...ZERO_TOTALS, ...(totalsAgg[0] || {}) };
   delete totals._id;
-  const today = { revenue: todayAgg[0]?.revenue || 0, bills: todayAgg[0]?.bills || 0 };
+  totals.returns = { count: returnsAgg[0]?.count || 0, refundTotal: returnsAgg[0]?.refundTotal || 0 };
+  totals.netRevenue = totals.revenue - (returnsAgg[0]?.refundImpact || 0);
+
+  const todayRefunds = todayReturnsAgg[0]?.refundTotal || 0;
+  const todayRevenue = todayAgg[0]?.revenue || 0;
+  const today = {
+    revenue: todayRevenue,
+    bills: todayAgg[0]?.bills || 0,
+    refunds: todayRefunds,
+    netRevenue: todayRevenue - todayRefunds,
+  };
 
   return {
     range: { from: query.from || null, to: query.to || null },
@@ -72,25 +119,44 @@ export const getSummary = async (query) => {
   };
 };
 
-// Day-wise sales for charts. When both from & to are given, missing days are
-// filled with zeros so the series is continuous.
+// Day-wise sales for charts. Each day carries gross `revenue`, `refunds` (returns
+// booked that day against still-counted bills), and `netRevenue = revenue - refunds`.
+// When both from & to are given, missing days are filled with zeros.
 export const getDailySales = async (query) => {
-  const match = salesMatch(query);
-  const rows = await Bill.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: REPORT_TIMEZONE } },
-        revenue: { $sum: '$total' },
-        bills: { $sum: 1 },
-        itemsSold: { $sum: { $size: '$items' } },
+  const [rows, refundRows] = await Promise.all([
+    Bill.aggregate([
+      { $match: salesMatch(query) },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: REPORT_TIMEZONE } },
+          revenue: { $sum: '$total' },
+          bills: { $sum: 1 },
+          itemsSold: { $sum: { $size: '$items' } },
+        },
       },
-    },
-    { $sort: { _id: 1 } },
-    { $project: { _id: 0, date: '$_id', revenue: 1, bills: 1, itemsSold: 1 } },
+      { $sort: { _id: 1 } },
+      { $project: { _id: 0, date: '$_id', revenue: 1, bills: 1, itemsSold: 1 } },
+    ]),
+    Return.aggregate([
+      { $match: returnMatch(query) },
+      { $lookup: { from: 'bills', localField: 'originalBill', foreignField: '_id', as: 'ob' } },
+      { $match: { 'ob.status': 'completed' } }, // only refunds adjusting still-counted revenue
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: REPORT_TIMEZONE } },
+          refunds: { $sum: '$refundTotal' },
+        },
+      },
+    ]),
   ]);
 
-  if (!query.from || !query.to) return rows;
+  const refundByDate = new Map(refundRows.map((r) => [r._id, r.refunds]));
+  const decorate = (row) => {
+    const refunds = refundByDate.get(row.date) || 0;
+    return { ...row, refunds, netRevenue: row.revenue - refunds };
+  };
+
+  if (!query.from || !query.to) return rows.map(decorate);
 
   // gap-fill the inclusive range
   const byDate = new Map(rows.map((r) => [r.date, r]));
@@ -98,7 +164,7 @@ export const getDailySales = async (query) => {
   const end = istDayStart(query.to).getTime();
   for (let cur = istDayStart(query.from).getTime(); cur <= end; cur += 24 * 3600 * 1000) {
     const key = istDateKey(new Date(cur));
-    filled.push(byDate.get(key) || { date: key, revenue: 0, bills: 0, itemsSold: 0 });
+    filled.push(decorate(byDate.get(key) || { date: key, revenue: 0, bills: 0, itemsSold: 0 }));
   }
   return filled;
 };
