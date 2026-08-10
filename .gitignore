@@ -34,3 +34,8 @@ Thumbs.db
 *.pid
 *.seed
 tmp/
+
+# Raw data exports (customer/product/bill spreadsheets - not versioned)
+Data/
+*.xlsx
+*.xls
