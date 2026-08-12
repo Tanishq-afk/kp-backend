@@ -7,8 +7,11 @@ import { COUNTER } from '../config/constants.js';
 import { getNextSequence } from '../utils/sequence.js';
 import { getPagination, buildPage } from '../utils/paginate.js';
 import { upsertByPhone } from './customer.service.js';
+import { getFinancialYear, billCounterKey } from '../utils/financialYear.js';
 
-export const formatBillNumber = (seq) => `INV-${String(seq).padStart(6, '0')}`;
+// "KP-0001" — resets every financial year (1 April) because `seq` comes from a
+// counter keyed per-FY (see billCounterKey), not the flat COUNTER.BILL.
+export const formatBillNumber = (seq) => `KP-${String(seq).padStart(4, '0')}`;
 
 // Map a barcode doc to a bill line item (snapshots so history stays accurate).
 const toItem = (b) => ({
@@ -98,13 +101,15 @@ export const computeAmounts = ({
   return { subtotal, discount, tax: taxAmt, total, amountPaid, changeReturned, paymentStatus };
 };
 
-// Find-or-create the customer when name+number are entered at the counter.
-export const resolveCustomer = async (customer, user) => {
+// Find-or-create the customer when name+number are entered at the counter. The
+// optional `remarks` (the bill's note) overrides the customer's standing remark
+// so the latest note surfaces in the customer list.
+export const resolveCustomer = async (customer, user, remarks) => {
   if (!customer) return null;
   if (!customer.name || !customer.phone) {
     throw new ApiError(400, 'Customer requires both a name and a phone number.');
   }
-  return upsertByPhone(customer, user);
+  return upsertByPhone({ ...customer, remarks: remarks ?? customer.remarks }, user);
 };
 
 // Mark sold + stamp the bill on every billed unit.
@@ -162,12 +167,14 @@ export const completeSaleInSession = async (
 ) => {
   const { items, barcodeDocs } = await resolveByCodes(payload.barcodes, session);
   const amounts = computeAmounts({ items, ...payload, appliedCredit });
-  const seq = await getNextSequence(COUNTER.BILL, { session });
+  const financialYear = getFinancialYear();
+  const seq = await getNextSequence(billCounterKey(financialYear), { session });
 
   const [bill] = await Bill.create(
     [
       {
         billNumber: formatBillNumber(seq),
+        financialYear,
         status: 'completed',
         appliedCredit,
         returnRef,
@@ -185,7 +192,7 @@ export const completeSaleInSession = async (
 // Create AND complete a sale in one transaction: validate scans, build the bill,
 // assign the invoice number, mark units sold, and decrement stock — atomically.
 export const createBill = async (payload, user) => {
-  const customer = await resolveCustomer(payload.customer, user);
+  const customer = await resolveCustomer(payload.customer, user, payload.remarks);
 
   const session = await mongoose.startSession();
   let billId;
@@ -203,7 +210,7 @@ export const createBill = async (payload, user) => {
 // Park an in-progress bill: validates scans are available now, but assigns NO
 // invoice number and makes NO stock change (units stay available).
 export const holdBill = async (payload, user) => {
-  const customer = await resolveCustomer(payload.customer, user);
+  const customer = await resolveCustomer(payload.customer, user, payload.remarks);
   const { items } = await resolveByCodes(payload.barcodes);
   const amounts = computeAmounts({ items, ...payload });
   const seq = await getNextSequence(COUNTER.HOLD);
@@ -227,7 +234,9 @@ export const completeHeldBill = async (id, payload, user) => {
   if (!held) throw new ApiError(404, 'Held bill not found.');
   if (held.status !== 'held') throw new ApiError(400, 'This bill is not on hold.');
 
-  const customer = payload.customer ? await resolveCustomer(payload.customer, user) : null;
+  const customer = payload.customer
+    ? await resolveCustomer(payload.customer, user, payload.remarks ?? held.remarks)
+    : null;
 
   const session = await mongoose.startSession();
   try {
@@ -243,8 +252,10 @@ export const completeHeldBill = async (id, payload, user) => {
       const payments = payload.payments ?? held.payments;
       const amounts = computeAmounts({ items, discountType, discountValue, tax, payments });
 
-      const seq = await getNextSequence(COUNTER.BILL, { session });
+      const financialYear = getFinancialYear();
+      const seq = await getNextSequence(billCounterKey(financialYear), { session });
       held.billNumber = formatBillNumber(seq);
+      held.financialYear = financialYear;
       held.status = 'completed';
       held.holdRef = null;
       held.heldAt = null;
@@ -291,6 +302,7 @@ export const listBills = async (query) => {
   const filter = {};
   filter.status = query.status || { $ne: 'held' };
   if (query.paymentStatus) filter.paymentStatus = query.paymentStatus;
+  if (query.financialYear) filter.financialYear = query.financialYear;
   if (query.from || query.to) {
     filter.createdAt = {};
     if (query.from) filter.createdAt.$gte = new Date(query.from);

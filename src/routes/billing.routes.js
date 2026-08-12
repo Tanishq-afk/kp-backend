@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { body, param } from 'express-validator';
+import { body, param, query } from 'express-validator';
 import validate from '../middleware/validate.js';
 import { protect, restrictTo } from '../middleware/auth.middleware.js';
 import { ROLE, PAYMENT_METHODS, DISCOUNT_TYPES } from '../config/constants.js';
@@ -47,7 +47,12 @@ router.post('/hold', restrictTo(ROLE.ADMIN), saleValidators, validate, billingCo
 router.post('/', restrictTo(ROLE.ADMIN), saleValidators, validate, billingController.create);
 
 // history (both roles)
-router.get('/', billingController.list);
+router.get(
+  '/',
+  [query('financialYear').optional().matches(/^\d{4}-\d{2}$/).withMessage('financialYear must look like "2026-27"')],
+  validate,
+  billingController.list
+);
 
 // resume a held bill -> finalize
 router.post('/:id/complete', restrictTo(ROLE.ADMIN), [...idParam, ...completeValidators], validate, billingController.completeHeld);

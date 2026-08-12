@@ -92,8 +92,14 @@ export const markPrinted = async ({ ids, product }) => {
 
 // Scan / lookup a single barcode by its scannable code, with product + category
 // context. Billing reuses this to add an item (and then enforces availability).
+//
+// Strips stray leading/trailing "*" — the Code39 start/stop guard characters
+// used on pre-migration printed labels (imported via importItemlist.js). Most
+// scanners already omit them, but this keeps lookup working either way; it's
+// a no-op for normal KP-generated codes, which never contain "*".
 export const lookupByCode = async (code) => {
-  const barcode = await Barcode.findOne({ code: String(code).trim() })
+  const cleaned = String(code).trim().replace(/^\*+|\*+$/g, '');
+  const barcode = await Barcode.findOne({ code: cleaned })
     .populate('product', 'name articleNumber mrp currentStock isActive')
     .populate('category', 'name gender');
   if (!barcode) throw new ApiError(404, 'No barcode found for this code.');

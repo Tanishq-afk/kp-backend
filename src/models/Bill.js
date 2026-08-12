@@ -54,6 +54,11 @@ const billSchema = new mongoose.Schema(
         'billNumber is required once a bill is completed',
       ],
     },
+    // Indian financial year the bill was completed in, e.g. "2026-27" (Apr-Mar).
+    // Drives per-year invoice numbering (KP-0001 resets every 1 April) and lets
+    // history be filtered/segregated by year. Set at completion time, same as
+    // billNumber — a held bill has neither yet.
+    financialYear: { type: String, trim: true, index: true },
     // ---- hold / park ----
     // Short reference for a parked bill so the admin can find and resume it from
     // the held-bills list (e.g. "HOLD-12"). Cleared when the bill is completed.

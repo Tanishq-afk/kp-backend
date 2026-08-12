@@ -223,3 +223,120 @@ export const getSalesByCategory = async (query) => {
     { $sort: { revenue: -1 } },
   ]);
 };
+
+// Comprehensive single-day (IST) report for a specific calendar date — not a
+// rolling 24h window. Covers sales rung up, money collected by method, returns /
+// refunds, the net, and the day's bill + return lists for a printable receipt.
+// `date` is a YYYY-MM-DD string (defaults to today in IST). Available to both
+// admin (counter reconciliation) and superadmin (oversight).
+export const getDaySummary = async (query = {}) => {
+  const date = query.date ? String(query.date) : istDateKey(new Date());
+  const inDay = { $gte: istDayStart(date), $lte: istDayEnd(date) };
+
+  // A "sale" for the day = a bill rung up that day, even if later refunded, so
+  // gross sales reflect what was actually billed. Exchanges are real sales too.
+  const saleFilter = { status: { $in: ['completed', 'refunded'] }, createdAt: inDay };
+
+  const [salesAgg, paymentsAgg, returnsAgg, returnItemsAgg, refundsAgg, billsList, returnsList] =
+    await Promise.all([
+      Bill.aggregate([
+        { $match: saleFilter },
+        {
+          $group: {
+            _id: null,
+            bills: { $sum: 1 },
+            gross: { $sum: '$total' },
+            discount: { $sum: '$discount' },
+            tax: { $sum: '$tax' },
+            itemsSold: { $sum: { $size: '$items' } },
+          },
+        },
+      ]),
+      Bill.aggregate([
+        { $match: saleFilter },
+        { $unwind: '$payments' },
+        { $group: { _id: '$payments.method', amount: { $sum: '$payments.amount' }, count: { $sum: 1 } } },
+        { $project: { _id: 0, method: '$_id', amount: 1, count: 1 } },
+        { $sort: { amount: -1 } },
+      ]),
+      Return.aggregate([
+        { $match: { createdAt: inDay } },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            refundTotal: { $sum: '$refundTotal' },
+            exchangeTotal: { $sum: '$exchangeTotal' },
+            itemsReturned: { $sum: { $size: '$items' } },
+            exchanges: { $sum: { $cond: [{ $ifNull: ['$exchangeBill', false] }, 1, 0] } },
+          },
+        },
+      ]),
+      Return.aggregate([
+        { $match: { createdAt: inDay } },
+        { $unwind: '$items' },
+        { $group: { _id: '$items.resellable', count: { $sum: 1 } } },
+      ]),
+      Return.aggregate([
+        { $match: { createdAt: inDay } },
+        { $unwind: '$settlement.payments' },
+        { $group: { _id: '$settlement.payments.method', amount: { $sum: '$settlement.payments.amount' } } },
+        { $project: { _id: 0, method: '$_id', amount: 1 } },
+        { $sort: { amount: -1 } },
+      ]),
+      Bill.find(saleFilter)
+        .select('billNumber customerName total paymentStatus returnRef items createdAt')
+        .sort({ createdAt: 1 })
+        .lean(),
+      Return.find({ createdAt: inDay })
+        .select('returnNumber originalBillNumber customerName refundTotal exchangeTotal netAmount settlement.direction createdAt')
+        .sort({ createdAt: 1 })
+        .lean(),
+    ]);
+
+  const sales = { bills: 0, gross: 0, discount: 0, tax: 0, itemsSold: 0, ...(salesAgg[0] || {}) };
+  delete sales._id;
+  const totalCollected = paymentsAgg.reduce((s, p) => s + p.amount, 0);
+
+  const returns = {
+    count: 0, refundTotal: 0, exchangeTotal: 0, itemsReturned: 0, exchanges: 0,
+    ...(returnsAgg[0] || {}),
+  };
+  delete returns._id;
+  returns.restocked = returnItemsAgg.find((r) => r._id === true)?.count || 0;
+  returns.damaged = returnItemsAgg.find((r) => r._id === false)?.count || 0;
+  const totalRefunded = refundsAgg.reduce((s, r) => s + r.amount, 0);
+
+  return {
+    date,
+    sales,
+    paymentsIn: paymentsAgg,
+    totalCollected,
+    returns,
+    refundsOut: refundsAgg,
+    totalRefunded,
+    net: {
+      revenue: sales.gross - returns.refundTotal,
+      inDrawer: totalCollected - totalRefunded,
+    },
+    bills: billsList.map((b) => ({
+      billNumber: b.billNumber,
+      customerName: b.customerName || null,
+      items: b.items?.length || 0,
+      total: b.total,
+      paymentStatus: b.paymentStatus,
+      isExchange: Boolean(b.returnRef),
+      createdAt: b.createdAt,
+    })),
+    returnsList: returnsList.map((r) => ({
+      returnNumber: r.returnNumber,
+      originalBillNumber: r.originalBillNumber,
+      customerName: r.customerName || null,
+      refundTotal: r.refundTotal,
+      exchangeTotal: r.exchangeTotal,
+      netAmount: r.netAmount,
+      direction: r.settlement?.direction,
+      createdAt: r.createdAt,
+    })),
+  };
+};

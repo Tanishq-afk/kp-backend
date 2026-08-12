@@ -14,6 +14,7 @@ const createValidators = [
   body('returnItems').isArray({ min: 1 }).withMessage('Select at least one item to return'),
   body('returnItems.*.barcode').isString().trim().notEmpty().withMessage('Invalid return item'),
   body('returnItems.*.resellable').optional().isBoolean().withMessage('resellable must be a boolean'),
+  body('returnItems.*.labelLost').optional().isBoolean().withMessage('labelLost must be a boolean'),
   // optional exchange (new items being bought in the same transaction)
   body('newBarcodes').optional().isArray().withMessage('newBarcodes must be an array'),
   body('newBarcodes.*').optional().isString().trim().notEmpty().withMessage('Invalid barcode code'),

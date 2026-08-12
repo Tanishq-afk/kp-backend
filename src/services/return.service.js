@@ -3,6 +3,7 @@ import Bill from '../models/Bill.js';
 import Barcode from '../models/Barcode.js';
 import Product from '../models/Product.js';
 import Return from '../models/Return.js';
+import Customer from '../models/Customer.js';
 import ApiError from '../utils/ApiError.js';
 import { COUNTER } from '../config/constants.js';
 import { getNextSequence, reserveSequenceBlock } from '../utils/sequence.js';
@@ -42,8 +43,17 @@ export const getReturnableItems = async (billId) => {
   const byId = new Map(barcodes.map((b) => [String(b._id), b]));
 
   const items = bill.items.map((it) => {
-    const b = byId.get(String(it.barcode));
-    const returnable = !!b && b.status === 'sold' && String(b.bill) === String(bill._id);
+    const b = it.barcode ? byId.get(String(it.barcode)) : null;
+    // Distinguish WHY an item isn't returnable — the UI shouldn't claim
+    // "already returned" for a bill that never had unit-level tracking to
+    // begin with (e.g. bills imported from historical records, name-only,
+    // no barcode). `null` means it genuinely is returnable.
+    let returnableReason = null;
+    if (!it.barcode || !b) {
+      returnableReason = 'no_unit_link'; // no barcode on this line — can't be processed as a return
+    } else if (String(b.bill) !== String(bill._id) || b.status !== 'sold') {
+      returnableReason = 'already_returned';
+    }
     return {
       barcode: it.barcode,
       product: it.product,
@@ -52,7 +62,8 @@ export const getReturnableItems = async (billId) => {
       size: it.size,
       mrp: it.mrp,
       refundAmount: effectiveRefund(bill, it.mrp),
-      returnable,
+      returnable: returnableReason === null,
+      returnableReason,
     };
   });
 
@@ -73,14 +84,15 @@ export const getReturnableItems = async (billId) => {
   };
 };
 
-// Mint one fresh barcode per resellable unit (its old label may be lost) and
-// bump the product's live stock. Returns a Map(originalBarcodeId -> newBarcodeId).
-const restockResellables = async (resellables, user, session) => {
+// Mint one fresh barcode per lost-label unit (the original label can't be
+// scanned again, so a new one is generated for the SAME product and dropped into
+// the print queue). Returns a Map(originalBarcodeId -> newBarcodeId).
+const mintReplacements = async (reissue, user, session) => {
   const linkByOriginal = new Map();
-  if (!resellables.length) return linkByOriginal;
+  if (!reissue.length) return linkByOriginal;
 
-  let serial = await reserveSequenceBlock(COUNTER.BARCODE, resellables.length, { session });
-  const docs = resellables.map(({ barcode }) => ({
+  let serial = await reserveSequenceBlock(COUNTER.BARCODE, reissue.length, { session });
+  const docs = reissue.map(({ barcode }) => ({
     code: buildBarcodeValue(serial),
     serialNumber: serial++,
     product: barcode.product,
@@ -95,9 +107,12 @@ const restockResellables = async (resellables, user, session) => {
     createdBy: user?._id,
   }));
   const inserted = await Barcode.insertMany(docs, { session });
-  resellables.forEach((x, i) => linkByOriginal.set(String(x.barcode._id), inserted[i]._id));
+  reissue.forEach((x, i) => linkByOriginal.set(String(x.barcode._id), inserted[i]._id));
+  return linkByOriginal;
+};
 
-  // +1 live stock per product for the units coming back in
+// Bump each product's live stock by how many of its units came back in.
+const restock = async (resellables, session) => {
   const counts = new Map();
   for (const { barcode } of resellables) {
     const k = String(barcode.product);
@@ -106,7 +121,6 @@ const restockResellables = async (resellables, user, session) => {
   for (const [productId, qty] of counts) {
     await Product.updateOne({ _id: productId }, { $inc: { currentStock: qty } }, { session });
   }
-  return linkByOriginal;
 };
 
 // Create a sales return / exchange in one transaction: retire returned units,
@@ -121,7 +135,9 @@ export const createReturn = async (payload, user) => {
 
   // Customer override (if any) is upserted outside the transaction, matching the
   // billing flow; otherwise the return inherits the original bill's customer.
-  const overrideCustomer = payload.customer ? await resolveCustomer(payload.customer, user) : null;
+  const overrideCustomer = payload.customer
+    ? await resolveCustomer(payload.customer, user, payload.remarks)
+    : null;
 
   const session = await mongoose.startSession();
   let returnId;
@@ -139,10 +155,21 @@ export const createReturn = async (payload, user) => {
           ? { _id: bill.customer, name: bill.customerName, phone: bill.customerPhone }
           : null);
 
+      // Mirror the return's note onto the customer so the latest remark shows in
+      // the customer list. An override already updated it via resolveCustomer;
+      // here we cover the inherited-customer case (the common return path).
+      const note = typeof payload.remarks === 'string' ? payload.remarks.trim() : '';
+      if (note && !overrideCustomer && bill.customer) {
+        await Customer.updateOne({ _id: bill.customer }, { $set: { remarks: note } }, { session });
+      }
+
       // 2. Resolve requested units against the bill (accept barcode id or code).
+      //    `labelLost` (resellable only) => the original label can't be scanned
+      //    again, so mint a fresh barcode instead of reusing the original.
       const requested = returnItems.map((ri) => ({
         key: String(ri.barcode).trim(),
         resellable: ri.resellable !== false, // default: resellable
+        labelLost: ri.resellable !== false && ri.labelLost === true,
       }));
       if (new Set(requested.map((r) => r.key)).size !== requested.length) {
         throw new ApiError(400, 'The same item was selected more than once.');
@@ -157,7 +184,7 @@ export const createReturn = async (payload, user) => {
       const resolved = requested.map((r) => {
         const b = byIdStr.get(r.key) || byCode.get(r.key);
         if (!b) throw new ApiError(400, `Item not on this bill: ${r.key}`);
-        return { barcode: b, resellable: r.resellable };
+        return { barcode: b, resellable: r.resellable, labelLost: r.labelLost };
       });
 
       const notReturnable = resolved.filter(
@@ -173,7 +200,7 @@ export const createReturn = async (payload, user) => {
       }
 
       // 3. Build return items + refund amounts.
-      const items = resolved.map(({ barcode, resellable }) => {
+      const items = resolved.map(({ barcode, resellable, labelLost }) => {
         const mrp = billItemByBarcode.get(String(barcode._id))?.mrp ?? barcode.mrp;
         return {
           barcode: barcode._id,
@@ -184,28 +211,47 @@ export const createReturn = async (payload, user) => {
           mrp,
           refundAmount: effectiveRefund(bill, mrp),
           resellable,
+          labelLost,
           newBarcode: null,
         };
       });
       const refundTotal = items.reduce((s, it) => s + it.refundAmount, 0);
 
-      // 4. Retire every returned unit's original label.
-      await Barcode.updateMany(
-        { _id: { $in: resolved.map((x) => x.barcode._id) } },
-        { $set: { status: 'returned' } },
-        { session }
-      );
+      // 4. Dispose of each returned unit's barcode:
+      //    - resellable + label intact  -> reuse the SAME barcode: back to
+      //      'available' (scan it again), clear its sold linkage.
+      //    - resellable + label lost    -> retire the original, mint a fresh one.
+      //    - damaged                    -> retire, not restocked.
+      const resellables = resolved.filter((x) => x.resellable);
+      const reuse = resellables.filter((x) => !x.labelLost);
+      const reissue = resellables.filter((x) => x.labelLost);
+      const retireIds = resolved
+        .filter((x) => !x.resellable || x.labelLost)
+        .map((x) => x.barcode._id);
 
-      // 5. Restock resellable units (fresh label + stock), link back onto items.
-      const linkByOriginal = await restockResellables(
-        resolved.filter((x) => x.resellable),
-        user,
-        session
-      );
+      if (retireIds.length) {
+        await Barcode.updateMany(
+          { _id: { $in: retireIds } },
+          { $set: { status: 'returned' } },
+          { session }
+        );
+      }
+      if (reuse.length) {
+        await Barcode.updateMany(
+          { _id: { $in: reuse.map((x) => x.barcode._id) } },
+          { $set: { status: 'available', bill: null, soldAt: null } },
+          { session }
+        );
+      }
+
+      // 5. Mint replacements for lost labels, link them onto their items, and
+      //    restock every resellable unit (reused + reissued).
+      const linkByOriginal = await mintReplacements(reissue, user, session);
       for (const it of items) {
         const nb = linkByOriginal.get(String(it.barcode));
         if (nb) it.newBarcode = nb;
       }
+      await restock(resellables, session);
 
       // 6. Optional exchange: sell scanned-in items as a normal bill. The net
       //    decides where money sits: a collect's cash goes on the exchange bill;

@@ -72,17 +72,22 @@ export const deleteCustomer = async (id) => {
   return { id };
 };
 
-// Find-or-create by phone — used by the billing flow when an admin enters a
-// customer's name + number. Atomic upsert avoids races under concurrent bills.
-// Existing customers' remarks are preserved (per-sale notes live on the Bill).
+// Find-or-create by phone — used by the billing/returns flow when an admin
+// enters a customer's name + number. Atomic upsert avoids races under concurrent
+// bills. A non-empty `remarks` OVERRIDES the customer's standing note (latest
+// entry wins, so it shows in the customer list); a blank note leaves any existing
+// remark untouched. `remarks` stays on exactly one update operator to avoid a
+// Mongo conflicting-path error.
 export const upsertByPhone = async ({ name, phone, remarks }, createdBy) => {
   const phoneVal = cleanPhone(phone);
+  const note = typeof remarks === 'string' ? remarks.trim() : '';
+  const set = { name };
+  const setOnInsert = { phone: phoneVal, createdBy: createdBy?._id };
+  if (note) set.remarks = note;
+  else setOnInsert.remarks = '';
   return Customer.findOneAndUpdate(
     { phone: phoneVal },
-    {
-      $set: { name },
-      $setOnInsert: { phone: phoneVal, remarks: remarks || '', createdBy: createdBy?._id },
-    },
+    { $set: set, $setOnInsert: setOnInsert },
     { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
   );
 };

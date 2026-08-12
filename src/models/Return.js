@@ -24,11 +24,13 @@ const returnItemSchema = new mongoose.Schema(
     // its MRP share of the bill total after discount/tax:
     //   round(bill.total * mrp / bill.subtotal)
     refundAmount: { type: Number, required: true, min: 0 },
-    // true  -> unit goes back into sellable stock and a fresh label is minted;
-    // false -> unit is retired (damaged), not restocked.
+    // true  -> unit goes back into sellable stock; false -> retired (damaged).
     resellable: { type: Boolean, default: true },
-    // The freshly minted replacement barcode (only for resellable returns — the
-    // original label may have been lost, so a new one is generated & re-printable).
+    // Resellable only: true when the original label was lost, so a fresh barcode
+    // was minted instead of reusing the original (see `newBarcode`).
+    labelLost: { type: Boolean, default: false },
+    // The freshly minted replacement barcode — set only when `labelLost` is true;
+    // null when the original barcode is simply reused (made available again).
     newBarcode: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Barcode',

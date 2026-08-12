@@ -155,14 +155,16 @@ parked bills), `customer` (ref, nullable) + `customerName`/`customerPhone`
 `originalBillNumber`, `customer` (ref, nullable) + `customerName`/`customerPhone`
 (snapshots, inherited from the bill unless overridden),
 `items: [{ barcode (the returned unit), product, productName, articleNumber, size,
-mrp, refundAmount, resellable, newBarcode }]`, `refundTotal` (Σ refundAmount),
+mrp, refundAmount, resellable, labelLost, newBarcode }]`, `refundTotal` (Σ refundAmount),
 `exchangeBill` (ref, nullable) + `exchangeTotal`, `netAmount`
 (`exchangeTotal − refundTotal`; >0 collect, <0 refund),
 `settlement: { direction (collect|refund|even), amount, payments[] }`,
 `remarks`, `status` (`completed`|`void`), `createdBy` (admin).
 - `refundAmount` = the unit's effective price paid = `round(bill.total × mrp / bill.subtotal)`.
-- `resellable` items are restocked and get a freshly minted `newBarcode` (the old
-  label may be lost); the original barcode is retired to `returned` either way.
+- `resellable` items are restocked (`currentStock` +1). By default the **original
+  barcode is reused** — set back to `available` so it scans again. If `labelLost`,
+  the original is retired to `returned` and a fresh `newBarcode` is minted (pending
+  print). Damaged items are retired to `returned`, not restocked.
 
 ### Counter
 `{ _id: <name>, seq: <number> }`. Mutated only via `$inc` through
@@ -258,9 +260,10 @@ A customer comes back with items from a past bill. The admin:
 3. **Selects units to return**, marking each **resellable** (default) or **damaged**, and
    may **scan new items** to buy in the same flow (an exchange).
 4. **Submits** (`POST /api/returns`) — everything below runs in **one transaction**:
-   - Each returned unit's original barcode is retired to `returned`. **Resellable** units
-     are restocked (`currentStock` +1) and get a **freshly minted, re-printable barcode**
-     (the old label may be lost); **damaged** units are not restocked.
+   - **Resellable** units are restocked (`currentStock` +1). By default the **original
+     barcode is reused** (set back to `available` so the same label scans again); if its
+     **label is lost**, the original is retired and a **fresh barcode is minted** (into the
+     print queue). **Damaged** units are retired to `returned`, not restocked.
    - If new items were scanned, they are sold as a **normal completed Bill** (invoice no.,
      units `sold`, stock decremented). The return credit is applied to it as `appliedCredit`,
      so it reads as fully paid; only the **net** is collected in cash/card/upi.
@@ -328,6 +331,11 @@ GET    /api/dashboard/sales/payment-methods    (superadmin) pie: cash/card/upi
 GET    /api/dashboard/sales/top-products       (superadmin) best sellers
 GET    /api/dashboard/sales/by-category        (superadmin) pie: sales by category
    (all accept optional ?from=YYYY-MM-DD&to=YYYY-MM-DD)
+
+GET    /api/reports/day-summary                (admin + superadmin) full single-day
+   (IST) report for ?date=YYYY-MM-DD (defaults to today): sales rung up, money
+   collected by method, returns/refunds, net, and the day's bill + return lists
+   (for a printable receipt). Unlike /api/dashboard (oversight-only), both roles read.
 ```
 
 ## 11. Getting Started
@@ -383,7 +391,9 @@ billNumber.
    **day-wise sales** (IST buckets, gap-filled), payment-method & category pies,
    top products. All optional `from`/`to` date range. Sales = completed bills.
 8. ✅ **Sales returns / exchanges:** look a bill up by number/phone → pick units to
-   return (resellable ↦ restock + fresh barcode; damaged ↦ retire) → optionally scan
-   new items and settle the net in one transaction. Refund = effective price paid;
-   full return flips the bill to `refunded`; reports net returns out.
+   return (resellable ↦ restock, reusing the same barcode unless the label is lost →
+   mint a fresh one; damaged ↦ retire) → optionally scan new items and settle the net
+   in one transaction. Refund = effective price paid; full return flips the bill to
+   `refunded`; reports net returns out. Day-summary report (`/api/reports/day-summary`,
+   both roles) prints a single-day sales + returns receipt.
 9. ⬜ **Frontend (React + MUI).**
