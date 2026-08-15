@@ -3,29 +3,43 @@ import Product from '../models/Product.js';
 import Category from '../models/Category.js';
 import Barcode from '../models/Barcode.js';
 import ApiError from '../utils/ApiError.js';
-import { COUNTER } from '../config/constants.js';
-import { reserveSequenceBlock } from '../utils/sequence.js';
+import { COUNTER, LOW_STOCK_THRESHOLD } from '../config/constants.js';
+import { reserveSequenceBlock, getNextSequence } from '../utils/sequence.js';
 import { buildBarcodeDocs, countUnits } from '../utils/barcodeGenerator.js';
 import { getPagination, buildPage } from '../utils/paginate.js';
 
 // Create a product and, in the same transaction, generate one Barcode per unit
 // of opening stock (e.g. XL:3 + L:4 => 7 barcodes). Product and barcodes commit
 // together, so a failure never leaves a product without its barcodes.
+//
+// articleNumber is system-assigned (never typed by the admin) — sequential,
+// via the shared articleNumber counter, seeded once from the highest existing
+// value so it continues on from the imported catalog instead of colliding.
 export const createProduct = async (payload, createdBy) => {
   const categoryExists = await Category.exists({ _id: payload.category });
   if (!categoryExists) {
     throw new ApiError(400, 'Selected category does not exist.');
   }
 
+  // Name uniqueness is enforced going forward only — the imported catalog has
+  // ~179 legitimate historical duplicates (same design/size text, different
+  // physical units), so this can't be a hard DB constraint without rewriting
+  // that history. A fresh duplicate from here on is almost always a mistake.
+  const nameExists = await Product.exists({ name: payload.name });
+  if (nameExists) {
+    throw new ApiError(409, 'A product with this name already exists.');
+  }
+
   const session = await mongoose.startSession();
   let outcome;
   try {
     await session.withTransaction(async () => {
+      const articleNumber = String(await getNextSequence(COUNTER.ARTICLE_NUMBER, { session }));
       const [product] = await Product.create(
         [
           {
             name: payload.name,
-            articleNumber: payload.articleNumber,
+            articleNumber,
             category: payload.category,
             costPrice: payload.costPrice,
             mrp: payload.mrp,
@@ -62,6 +76,9 @@ export const listProducts = async (query) => {
   if (query.category) filter.category = query.category;
   if (query.sizeType) filter.sizeType = query.sizeType;
   if (query.isActive !== undefined) filter.isActive = query.isActive === 'true';
+  if (query.stockStatus === 'out') filter.currentStock = 0;
+  else if (query.stockStatus === 'low') filter.currentStock = { $gt: 0, $lte: LOW_STOCK_THRESHOLD };
+  else if (query.stockStatus === 'in') filter.currentStock = { $gt: 0 };
   if (query.search) {
     const rx = { $regex: String(query.search).trim(), $options: 'i' };
     filter.$or = [{ name: rx }, { articleNumber: rx }];
@@ -96,9 +113,10 @@ export const getProduct = async (id) => {
 
 // Update product details only. Sizes / sizeType are intentionally not editable
 // here because changing them would require generating/removing barcodes; that
-// belongs to a dedicated stock-adjustment flow (later).
+// belongs to a dedicated stock-adjustment flow (later). articleNumber is also
+// not editable — it's system-assigned once at creation, never after.
 export const updateProduct = async (id, updates) => {
-  const allowed = ['name', 'articleNumber', 'costPrice', 'mrp', 'category', 'isActive'];
+  const allowed = ['name', 'costPrice', 'mrp', 'category', 'isActive'];
   const patch = {};
   for (const key of allowed) {
     if (updates[key] !== undefined) patch[key] = updates[key];
@@ -107,6 +125,11 @@ export const updateProduct = async (id, updates) => {
   if (patch.category) {
     const exists = await Category.exists({ _id: patch.category });
     if (!exists) throw new ApiError(400, 'Selected category does not exist.');
+  }
+
+  if (patch.name) {
+    const nameExists = await Product.exists({ name: patch.name, _id: { $ne: id } });
+    if (nameExists) throw new ApiError(409, 'A product with this name already exists.');
   }
 
   const product = await Product.findByIdAndUpdate(id, patch, {

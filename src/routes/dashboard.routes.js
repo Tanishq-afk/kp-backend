@@ -21,5 +21,7 @@ router.get('/sales/daily', dateRange, validate, dashboardController.dailySales);
 router.get('/sales/payment-methods', dateRange, validate, dashboardController.paymentMethods);
 router.get('/sales/top-products', [...dateRange, query('limit').optional().isInt({ min: 1, max: 50 })], validate, dashboardController.topProducts);
 router.get('/sales/by-category', dateRange, validate, dashboardController.salesByCategory);
+router.get('/stock/summary', dashboardController.stockSummary);
+router.get('/stock/by-category', dashboardController.stockByCategory);
 
 export default router;

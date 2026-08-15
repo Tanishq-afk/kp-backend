@@ -31,3 +31,15 @@ export const salesByCategory = asyncHandler(async (req, res) => {
   const data = await dashboardService.getSalesByCategory(req.query);
   res.json({ success: true, data });
 });
+
+// GET /api/dashboard/stock/summary — inventory KPIs (current stock, not sales).
+export const stockSummary = asyncHandler(async (req, res) => {
+  const data = await dashboardService.getStockSummary();
+  res.json({ success: true, data });
+});
+
+// GET /api/dashboard/stock/by-category — current stock breakdown by category.
+export const stockByCategory = asyncHandler(async (req, res) => {
+  const data = await dashboardService.getStockByCategory();
+  res.json({ success: true, data });
+});

@@ -3,7 +3,7 @@ import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import Return from '../models/Return.js';
-import { REPORT_TIMEZONE, ROLE } from '../config/constants.js';
+import { REPORT_TIMEZONE, ROLE, LOW_STOCK_THRESHOLD } from '../config/constants.js';
 
 // ---- IST day helpers -------------------------------------------------------
 const IST_OFFSET_MIN = 330; // Asia/Kolkata is UTC+5:30 (no DST)
@@ -221,6 +221,68 @@ export const getSalesByCategory = async (query) => {
       },
     },
     { $sort: { revenue: -1 } },
+  ]);
+};
+
+// Inventory oversight KPIs (superadmin) — not sales, current stock on hand.
+export const getStockSummary = async () => {
+  const [agg] = await Product.aggregate([
+    { $match: { isActive: true } },
+    {
+      $group: {
+        _id: null,
+        totalProducts: { $sum: 1 },
+        totalUnitsInStock: { $sum: '$currentStock' },
+        inventoryCostValue: { $sum: { $multiply: ['$currentStock', '$costPrice'] } },
+        inventoryRetailValue: { $sum: { $multiply: ['$currentStock', '$mrp'] } },
+        outOfStock: { $sum: { $cond: [{ $eq: ['$currentStock', 0] }, 1, 0] } },
+        lowStock: {
+          $sum: {
+            $cond: [
+              { $and: [{ $gt: ['$currentStock', 0] }, { $lte: ['$currentStock', LOW_STOCK_THRESHOLD] }] },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  return {
+    totalProducts: agg?.totalProducts || 0,
+    totalUnitsInStock: agg?.totalUnitsInStock || 0,
+    inventoryCostValue: agg?.inventoryCostValue || 0,
+    inventoryRetailValue: agg?.inventoryRetailValue || 0,
+    outOfStock: agg?.outOfStock || 0,
+    lowStock: agg?.lowStock || 0,
+  };
+};
+
+// Current stock (units + value) grouped by category — for a breakdown
+// chart/table, not a sales metric.
+export const getStockByCategory = async () => {
+  return Product.aggregate([
+    { $match: { isActive: true } },
+    {
+      $group: {
+        _id: '$category',
+        productCount: { $sum: 1 },
+        totalStock: { $sum: '$currentStock' },
+        inventoryValue: { $sum: { $multiply: ['$currentStock', '$costPrice'] } },
+      },
+    },
+    { $lookup: { from: 'categories', localField: '_id', foreignField: '_id', as: 'c' } },
+    {
+      $project: {
+        _id: 0,
+        category: '$_id',
+        categoryName: { $arrayElemAt: ['$c.name', 0] },
+        productCount: 1,
+        totalStock: 1,
+        inventoryValue: 1,
+      },
+    },
+    { $sort: { totalStock: -1 } },
   ]);
 };
 

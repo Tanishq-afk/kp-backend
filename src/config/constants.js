@@ -80,9 +80,14 @@ export const COUNTER = {
   BARCODE: 'barcode',
   HOLD: 'hold',
   RETURN: 'return',
+  ARTICLE_NUMBER: 'articleNumber',
 };
 
 // ---- Reporting -------------------------------------------------------------
 // Timezone used to bucket day-wise sales (the shop is in India), so a "day"
 // matches local business hours rather than UTC.
 export const REPORT_TIMEZONE = 'Asia/Kolkata';
+
+// Stock threshold below which an in-stock (>0) product counts as "low stock",
+// for the superadmin stock-overview page and dashboard.
+export const LOW_STOCK_THRESHOLD = 2;

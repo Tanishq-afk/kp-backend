@@ -22,11 +22,13 @@ const productSchema = new mongoose.Schema(
       required: [true, 'Product name is required'],
       trim: true,
     },
+    // System-assigned (sequential, via the articleNumber counter) — never
+    // typed by the admin, so this is safe to enforce as a real unique index.
     articleNumber: {
       type: String,
       required: [true, 'Article number is required'],
       trim: true,
-      index: true,
+      unique: true,
     },
     category: {
       type: mongoose.Schema.Types.ObjectId,
