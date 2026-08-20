@@ -19,6 +19,12 @@ export const markPrinted = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+// DELETE /api/barcodes/:id (admin) — delete one barcode record.
+export const remove = asyncHandler(async (req, res) => {
+  const data = await barcodeService.deleteBarcode(req.params.id);
+  res.json({ success: true, data });
+});
+
 // GET /api/barcodes/:code — scan / lookup a single barcode.
 export const lookup = asyncHandler(async (req, res) => {
   const barcode = await barcodeService.lookupByCode(req.params.code);

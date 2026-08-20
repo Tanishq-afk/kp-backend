@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { body } from 'express-validator';
+import { body, param } from 'express-validator';
 import validate from '../middleware/validate.js';
 import { protect, restrictTo } from '../middleware/auth.middleware.js';
 import { ROLE } from '../config/constants.js';
@@ -27,7 +27,17 @@ router.post(
   barcodeController.markPrinted
 );
 
-// Scan / lookup by code — keep last (catch-all param).
+// Delete one barcode (admin). Blocked for sold units — see service.
+router.delete(
+  '/:id',
+  restrictTo(ROLE.ADMIN),
+  [param('id').isMongoId().withMessage('Invalid barcode id')],
+  validate,
+  barcodeController.remove
+);
+
+// Scan / lookup by code — keep last (catch-all param, GET only so it
+// doesn't shadow the DELETE /:id above).
 router.get('/:code', barcodeController.lookup);
 
 export default router;
