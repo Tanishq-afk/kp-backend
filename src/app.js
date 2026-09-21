@@ -15,6 +15,7 @@ import billingRoutes from './routes/billing.routes.js';
 import returnRoutes from './routes/return.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
 import reportRoutes from './routes/report.routes.js';
+import expenseRoutes from './routes/expense.routes.js';
 
 // Builds and configures the Express app. Route modules are mounted under /api
 // in later phases (auth, products, billing, etc.).
@@ -77,6 +78,7 @@ app.use('/api/bills', billingRoutes);
 app.use('/api/returns', returnRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/expenses', expenseRoutes);
 // (more route modules mounted here in later phases)
 
 // ---- Error handling (must be last) ----

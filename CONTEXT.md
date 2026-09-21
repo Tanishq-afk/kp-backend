@@ -336,6 +336,13 @@ GET    /api/reports/day-summary                (admin + superadmin) full single-
    (IST) report for ?date=YYYY-MM-DD (defaults to today): sales rung up, money
    collected by method, returns/refunds, net, and the day's bill + return lists
    (for a printable receipt). Unlike /api/dashboard (oversight-only), both roles read.
+   Also returns `expenses {total,count,items}` — informational, NOT part of `net`.
+
+POST   /api/expenses            (admin + superadmin) { reason, amount }
+GET    /api/expenses            (admin + superadmin) list + `totalAmount`, ?from&to&page&limit
+GET    /api/expenses/daily      (admin + superadmin) [{ key:'YYYY-MM-DD', total, count }]
+GET    /api/expenses/monthly    (superadmin)         [{ key:'YYYY-MM', total, count }]
+   (dashboard summary `totals.expenses` = {total,count} over the from/to range)
 ```
 
 ## 11. Getting Started
@@ -396,4 +403,7 @@ billNumber.
    in one transaction. Refund = effective price paid; full return flips the bill to
    `refunded`; reports net returns out. Day-summary report (`/api/reports/day-summary`,
    both roles) prints a single-day sales + returns receipt.
-9. ⬜ **Frontend (React + MUI).**
+9. ✅ **Expenses:** `Expense` model (`reason`, `amount`, `createdBy`; day = createdAt in
+   IST). Spare ledger only — never subtracted from revenue, net or drawer. Shown on the
+   superadmin dashboard (range filter) and in the day summary.
+10. ⬜ **Frontend (React + MUI).**

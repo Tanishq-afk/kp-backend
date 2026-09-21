@@ -3,21 +3,22 @@ import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import Return from '../models/Return.js';
+import Expense from '../models/Expense.js';
 import { REPORT_TIMEZONE, ROLE, LOW_STOCK_THRESHOLD } from '../config/constants.js';
 
 // ---- IST day helpers -------------------------------------------------------
 const IST_OFFSET_MIN = 330; // Asia/Kolkata is UTC+5:30 (no DST)
 
 // UTC instant of IST-midnight for the given date (default: now).
-const istDayStart = (d = new Date()) => {
+export const istDayStart = (d = new Date()) => {
   const shifted = new Date(new Date(d).getTime() + IST_OFFSET_MIN * 60000);
   shifted.setUTCHours(0, 0, 0, 0);
   return new Date(shifted.getTime() - IST_OFFSET_MIN * 60000);
 };
-const istDayEnd = (d) => new Date(istDayStart(d).getTime() + 24 * 3600 * 1000 - 1);
+export const istDayEnd = (d) => new Date(istDayStart(d).getTime() + 24 * 3600 * 1000 - 1);
 
 // 'YYYY-MM-DD' in IST (matches $dateToString with the same timezone).
-const istDateKey = (d) =>
+export const istDateKey = (d) =>
   new Intl.DateTimeFormat('en-CA', { timeZone: REPORT_TIMEZONE }).format(d);
 
 // Match clause: completed bills, optionally within an IST date range.
@@ -48,7 +49,7 @@ const ZERO_TOTALS = { revenue: 0, bills: 0, itemsSold: 0, discountGiven: 0, taxC
 export const getSummary = async (query) => {
   const match = salesMatch(query);
 
-  const [totalsAgg, todayAgg, returnsAgg, todayReturnsAgg, products, customers, activeAdmins, heldBills] =
+  const [totalsAgg, todayAgg, returnsAgg, todayReturnsAgg, products, customers, activeAdmins, heldBills, expensesAgg] =
     await Promise.all([
       Bill.aggregate([
         { $match: match },
@@ -95,12 +96,18 @@ export const getSummary = async (query) => {
       Customer.countDocuments({}),
       User.countDocuments({ role: ROLE.ADMIN, isActive: true }),
       Bill.countDocuments({ status: 'held' }),
+      // Informational only — expenses are never subtracted from revenue.
+      Expense.aggregate([
+        { $match: returnMatch(query) },
+        { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+      ]),
     ]);
 
   const totals = { ...ZERO_TOTALS, ...(totalsAgg[0] || {}) };
   delete totals._id;
   totals.returns = { count: returnsAgg[0]?.count || 0, refundTotal: returnsAgg[0]?.refundTotal || 0 };
   totals.netRevenue = totals.revenue - (returnsAgg[0]?.refundImpact || 0);
+  totals.expenses = { total: expensesAgg[0]?.total || 0, count: expensesAgg[0]?.count || 0 };
 
   const todayRefunds = todayReturnsAgg[0]?.refundTotal || 0;
   const todayRevenue = todayAgg[0]?.revenue || 0;
@@ -299,7 +306,7 @@ export const getDaySummary = async (query = {}) => {
   // gross sales reflect what was actually billed. Exchanges are real sales too.
   const saleFilter = { status: { $in: ['completed', 'refunded'] }, createdAt: inDay };
 
-  const [salesAgg, paymentsAgg, returnsAgg, returnItemsAgg, refundsAgg, billsList, returnsList] =
+  const [salesAgg, paymentsAgg, returnsAgg, returnItemsAgg, refundsAgg, billsList, returnsList, expensesList] =
     await Promise.all([
       Bill.aggregate([
         { $match: saleFilter },
@@ -354,6 +361,7 @@ export const getDaySummary = async (query = {}) => {
         .select('returnNumber originalBillNumber customerName refundTotal exchangeTotal netAmount settlement.direction createdAt')
         .sort({ createdAt: 1 })
         .lean(),
+      Expense.find({ createdAt: inDay }).select('reason amount createdAt').sort({ createdAt: 1 }).lean(),
     ]);
 
   const sales = { bills: 0, gross: 0, discount: 0, tax: 0, itemsSold: 0, ...(salesAgg[0] || {}) };
@@ -390,6 +398,12 @@ export const getDaySummary = async (query = {}) => {
       isExchange: Boolean(b.returnRef),
       createdAt: b.createdAt,
     })),
+    // Informational only: NOT part of `net` (revenue / drawer figures stay pure billing).
+    expenses: {
+      total: expensesList.reduce((sum, e) => sum + e.amount, 0),
+      count: expensesList.length,
+      items: expensesList.map((e) => ({ _id: e._id, reason: e.reason, amount: e.amount, createdAt: e.createdAt })),
+    },
     returnsList: returnsList.map((r) => ({
       returnNumber: r.returnNumber,
       originalBillNumber: r.originalBillNumber,
