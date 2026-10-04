@@ -46,8 +46,10 @@ const returnMatch = (query = {}) => {
 const ZERO_TOTALS = { revenue: 0, bills: 0, itemsSold: 0, discountGiven: 0, taxCollected: 0 };
 
 // KPI cards: totals over the range, a "today" snapshot, and live counts.
+// Sales here match the printed range report: bills rung up in range, including
+// ones later fully refunded (status 'refunded'). Net = sale - all refunds in range.
 export const getSummary = async (query) => {
-  const match = salesMatch(query);
+  const match = { status: { $in: ['completed', 'refunded'] }, ...returnMatch(query) };
 
   const [totalsAgg, todayAgg, returnsAgg, todayReturnsAgg, products, customers, activeAdmins, heldBills, expensesAgg] =
     await Promise.all([
@@ -68,23 +70,15 @@ export const getSummary = async (query) => {
         { $match: { status: 'completed', createdAt: { $gte: istDayStart() } } },
         { $group: { _id: null, revenue: { $sum: '$total' }, bills: { $sum: 1 } } },
       ]),
-      // Returns in range. `refundImpact` = refunds against bills that are STILL
-      // 'completed' (i.e. still counted in revenue above); a fully-returned bill
-      // flips to 'refunded' and already drops out of revenue, so its refund must
-      // NOT be subtracted again. netRevenue = revenue - refundImpact stays consistent.
+      // Returns in range (all refund credit issued, including on fully refunded bills).
       Return.aggregate([
         { $match: returnMatch(query) },
-        { $lookup: { from: 'bills', localField: 'originalBill', foreignField: '_id', as: 'ob' } },
         {
           $group: {
             _id: null,
             count: { $sum: 1 },
             refundTotal: { $sum: '$refundTotal' },
-            refundImpact: {
-              $sum: {
-                $cond: [{ $eq: [{ $arrayElemAt: ['$ob.status', 0] }, 'completed'] }, '$refundTotal', 0],
-              },
-            },
+            itemsReturned: { $sum: { $size: '$items' } },
           },
         },
       ]),
@@ -105,8 +99,12 @@ export const getSummary = async (query) => {
 
   const totals = { ...ZERO_TOTALS, ...(totalsAgg[0] || {}) };
   delete totals._id;
-  totals.returns = { count: returnsAgg[0]?.count || 0, refundTotal: returnsAgg[0]?.refundTotal || 0 };
-  totals.netRevenue = totals.revenue - (returnsAgg[0]?.refundImpact || 0);
+  totals.returns = {
+    count: returnsAgg[0]?.count || 0,
+    itemsReturned: returnsAgg[0]?.itemsReturned || 0,
+    refundTotal: returnsAgg[0]?.refundTotal || 0,
+  };
+  totals.netRevenue = totals.revenue - totals.returns.refundTotal;
   totals.expenses = { total: expensesAgg[0]?.total || 0, count: expensesAgg[0]?.count || 0 };
 
   const todayRefunds = todayReturnsAgg[0]?.refundTotal || 0;
@@ -291,6 +289,56 @@ export const getStockByCategory = async () => {
     },
     { $sort: { totalStock: -1 } },
   ]);
+};
+
+// Printable report for an IST date range (superadmin dashboard "Print"). Uses the
+// same definitions as the day-summary so the two never disagree:
+//   sale      = bills rung up in range (completed or later refunded), gross
+//   return    = refund credit issued in range (returns.refundTotal)
+//   netRevenue = sale - return. Expenses are shown for reference only, NOT deducted.
+export const getRangeReport = async (query = {}) => {
+  const [salesAgg, returnsAgg, expensesAgg] = await Promise.all([
+    Bill.aggregate([
+      { $match: { status: { $in: ['completed', 'refunded'] }, ...returnMatch(query) } },
+      {
+        $group: {
+          _id: null,
+          bills: { $sum: 1 },
+          gross: { $sum: '$total' },
+          itemsSold: { $sum: { $size: '$items' } },
+        },
+      },
+    ]),
+    Return.aggregate([
+      { $match: returnMatch(query) },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          refundTotal: { $sum: '$refundTotal' },
+          itemsReturned: { $sum: { $size: '$items' } },
+        },
+      },
+    ]),
+    Expense.aggregate([
+      { $match: returnMatch(query) },
+      { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const sales = { bills: 0, gross: 0, itemsSold: 0, ...(salesAgg[0] || {}) };
+  delete sales._id;
+  const returns = { count: 0, refundTotal: 0, itemsReturned: 0, ...(returnsAgg[0] || {}) };
+  delete returns._id;
+
+  return {
+    range: { from: query.from || null, to: query.to || null },
+    sales,
+    returns,
+    net: { revenue: sales.gross - returns.refundTotal },
+    // Informational only — NOT part of `net`.
+    expenses: { total: expensesAgg[0]?.total || 0, count: expensesAgg[0]?.count || 0 },
+  };
 };
 
 // Comprehensive single-day (IST) report for a specific calendar date — not a
