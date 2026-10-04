@@ -17,6 +17,7 @@ const dateRange = [
 ];
 
 router.get('/summary', dateRange, validate, dashboardController.summary);
+router.get('/report', dateRange, validate, dashboardController.rangeReport);
 router.get('/sales/daily', dateRange, validate, dashboardController.dailySales);
 router.get('/sales/payment-methods', dateRange, validate, dashboardController.paymentMethods);
 router.get('/sales/top-products', [...dateRange, query('limit').optional().isInt({ min: 1, max: 50 })], validate, dashboardController.topProducts);

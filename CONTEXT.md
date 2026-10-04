@@ -326,6 +326,9 @@ GET    /api/returns              (auth)  returns history (date/search) + paginat
 GET    /api/returns/:id          (auth)  full return (items, refund, exchange, settlement)
 
 GET    /api/dashboard/summary                  (superadmin) KPIs + today + counts + returns
+GET    /api/dashboard/report                   (superadmin) printable range report (IST):
+   total sale, total return, bills, items sold, returned items, net revenue, and
+   expenses (reference only, NOT deducted). Same definitions as the day-summary.
 GET    /api/dashboard/sales/daily              (superadmin) day-wise series (IST, gap-filled)
 GET    /api/dashboard/sales/payment-methods    (superadmin) pie: cash/card/upi
 GET    /api/dashboard/sales/top-products       (superadmin) best sellers

@@ -7,6 +7,12 @@ export const summary = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+// GET /api/dashboard/report — printable sale / return / net / expenses for a range.
+export const rangeReport = asyncHandler(async (req, res) => {
+  const data = await dashboardService.getRangeReport(req.query);
+  res.json({ success: true, data });
+});
+
 // GET /api/dashboard/sales/daily — day-wise sales series.
 export const dailySales = asyncHandler(async (req, res) => {
   const data = await dashboardService.getDailySales(req.query);
