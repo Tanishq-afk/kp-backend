@@ -5,6 +5,7 @@ import User from '../models/User.js';
 import Return from '../models/Return.js';
 import Expense from '../models/Expense.js';
 import { REPORT_TIMEZONE, ROLE, LOW_STOCK_THRESHOLD } from '../config/constants.js';
+import ApiError from '../utils/ApiError.js';
 import { istDayStart, istDayEnd, istDateKey, istRangeFilter } from '../utils/istDate.js';
 
 // Match clause: completed bills, optionally within an IST date range.
@@ -265,6 +266,57 @@ export const getStockByCategory = async () => {
     },
     { $sort: { totalStock: -1 } },
   ]);
+};
+
+const DAY_MS = 24 * 3600 * 1000;
+const STATEMENT_MAX_DAYS = 366;
+
+// Account statement for an IST date range (both dates required): one row per IST
+// day, oldest first. Net sale = sales rung up that day (completed or later refunded)
+// minus refunds issued that day, the same definitions as the printed reports.
+// Expenses are not deducted per day; they reduce the total at the bottom.
+export const getAccountStatement = async ({ from, to }) => {
+  const span = Math.round((istDayStart(to).getTime() - istDayStart(from).getTime()) / DAY_MS) + 1;
+  if (span < 1) throw new ApiError(400, 'to must be on or after from');
+  if (span > STATEMENT_MAX_DAYS) throw new ApiError(400, `Range can be at most ${STATEMENT_MAX_DAYS} days`);
+
+  const createdAt = istRangeFilter({ from, to });
+  const dayKey = { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: REPORT_TIMEZONE } };
+  const [salesRows, returnRows, [expenseAgg]] = await Promise.all([
+    Bill.aggregate([
+      { $match: { status: { $in: ['completed', 'refunded'] }, createdAt } },
+      { $group: { _id: dayKey, sale: { $sum: '$total' } } },
+    ]),
+    Return.aggregate([
+      { $match: { createdAt } },
+      { $group: { _id: dayKey, returns: { $sum: '$refundTotal' } } },
+    ]),
+    Expense.aggregate([
+      { $match: { createdAt } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+  ]);
+
+  const saleByDay = new Map(salesRows.map((r) => [r._id, r.sale]));
+  const returnByDay = new Map(returnRows.map((r) => [r._id, r.returns]));
+  const rows = [];
+  const end = istDayStart(to).getTime();
+  for (let cur = istDayStart(from).getTime(); cur <= end; cur += DAY_MS) {
+    const date = istDateKey(new Date(cur));
+    const sale = saleByDay.get(date) || 0;
+    const returns = returnByDay.get(date) || 0;
+    rows.push({ date, sale, returns, netSale: sale - returns });
+  }
+
+  const sale = rows.reduce((s, r) => s + r.sale, 0);
+  const returns = rows.reduce((s, r) => s + r.returns, 0);
+  const netRevenue = sale - returns;
+  const expenses = expenseAgg?.total || 0;
+  return {
+    range: { from, to },
+    rows,
+    totals: { sale, returns, netRevenue, expenses, revenueAfterExpenses: netRevenue - expenses },
+  };
 };
 
 // Printable report for an IST date range (superadmin dashboard "Print"). Uses the

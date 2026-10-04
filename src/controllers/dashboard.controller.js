@@ -13,6 +13,12 @@ export const rangeReport = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+// GET /api/dashboard/account-statement?from&to — per-day net sale + totals after expenses.
+export const accountStatement = asyncHandler(async (req, res) => {
+  const data = await dashboardService.getAccountStatement(req.query);
+  res.json({ success: true, data });
+});
+
 // GET /api/dashboard/sales/daily — day-wise sales series.
 export const dailySales = asyncHandler(async (req, res) => {
   const data = await dashboardService.getDailySales(req.query);

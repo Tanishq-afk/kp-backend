@@ -11,3 +11,9 @@ const istDate = (field) =>
     });
 
 export const dateRangeValidators = [istDate('from'), istDate('to')];
+
+// Required variant (used where a range must be given), with a clear error.
+export const requiredIstDate = (field) => (value) => {
+  if (!isIstDateString(value)) throw new Error(`${field} must be a date (YYYY-MM-DD)`);
+  return true;
+};
