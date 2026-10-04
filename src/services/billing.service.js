@@ -3,7 +3,8 @@ import Bill from '../models/Bill.js';
 import Barcode from '../models/Barcode.js';
 import Product from '../models/Product.js';
 import ApiError from '../utils/ApiError.js';
-import { COUNTER } from '../config/constants.js';
+import { COUNTER, PRINT_LIST_MAX_ROWS } from '../config/constants.js';
+import { billListFilter } from './listFilters.js';
 import { getNextSequence } from '../utils/sequence.js';
 import { getPagination, buildPage } from '../utils/paginate.js';
 import { upsertByPhone } from './customer.service.js';
@@ -299,30 +300,31 @@ export const discardHeldBill = async (id) => {
 // Billing history (excludes held bills by default). Supports status / payment /
 // date-range / text-search filters + pagination.
 export const listBills = async (query) => {
-  const filter = {};
-  filter.status = query.status || { $ne: 'held' };
-  if (query.paymentStatus) filter.paymentStatus = query.paymentStatus;
-  if (query.financialYear) filter.financialYear = query.financialYear;
-  if (query.from || query.to) {
-    filter.createdAt = {};
-    if (query.from) filter.createdAt.$gte = new Date(query.from);
-    if (query.to) {
-      const t = new Date(query.to);
-      t.setHours(23, 59, 59, 999);
-      filter.createdAt.$lte = t;
-    }
-  }
-  if (query.search) {
-    const rx = { $regex: String(query.search).trim(), $options: 'i' };
-    filter.$or = [{ billNumber: rx }, { customerName: rx }, { customerPhone: rx }];
-  }
-
+  const filter = billListFilter(query);
   const { page, limit, skip } = getPagination(query);
   const [items, total] = await Promise.all([
     Bill.find(filter).populate('customer', 'name phone').sort({ createdAt: -1 }).skip(skip).limit(limit),
     Bill.countDocuments(filter),
   ]);
   return buildPage(items, total, { page, limit });
+};
+
+// Superadmin print list: the same bills as the on-screen history (same filter), newest
+// first. Items are capped at PRINT_LIST_MAX_ROWS; count and total cover every match.
+export const listBillsForPrint = async (query) => {
+  const filter = billListFilter(query);
+  const [bills, [totals]] = await Promise.all([
+    Bill.find(filter).select('billNumber createdAt total').sort({ createdAt: -1 }).limit(PRINT_LIST_MAX_ROWS).lean(),
+    Bill.aggregate([{ $match: filter }, { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$total' } } }]),
+  ]);
+  const count = totals?.count || 0;
+  return {
+    items: bills.map((b) => ({ billNumber: b.billNumber, createdAt: b.createdAt, total: b.total })),
+    count,
+    total: totals?.total || 0,
+    truncated: count > bills.length,
+    limit: PRINT_LIST_MAX_ROWS,
+  };
 };
 
 export const getBill = async (id) => {

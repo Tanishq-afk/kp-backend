@@ -1,7 +1,7 @@
 import Expense from '../models/Expense.js';
 import { REPORT_TIMEZONE } from '../config/constants.js';
 import { getPagination, buildPage } from '../utils/paginate.js';
-import { istDayStart, istDayEnd, istDateKey } from './dashboard.service.js';
+import { istDayStart, istDayEnd, istDateKey } from '../utils/istDate.js';
 
 // Optional IST date range on createdAt.
 const rangeMatch = (query = {}) => {

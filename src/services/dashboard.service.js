@@ -5,42 +5,18 @@ import User from '../models/User.js';
 import Return from '../models/Return.js';
 import Expense from '../models/Expense.js';
 import { REPORT_TIMEZONE, ROLE, LOW_STOCK_THRESHOLD } from '../config/constants.js';
-
-// ---- IST day helpers -------------------------------------------------------
-const IST_OFFSET_MIN = 330; // Asia/Kolkata is UTC+5:30 (no DST)
-
-// UTC instant of IST-midnight for the given date (default: now).
-export const istDayStart = (d = new Date()) => {
-  const shifted = new Date(new Date(d).getTime() + IST_OFFSET_MIN * 60000);
-  shifted.setUTCHours(0, 0, 0, 0);
-  return new Date(shifted.getTime() - IST_OFFSET_MIN * 60000);
-};
-export const istDayEnd = (d) => new Date(istDayStart(d).getTime() + 24 * 3600 * 1000 - 1);
-
-// 'YYYY-MM-DD' in IST (matches $dateToString with the same timezone).
-export const istDateKey = (d) =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: REPORT_TIMEZONE }).format(d);
+import { istDayStart, istDayEnd, istDateKey, istRangeFilter } from '../utils/istDate.js';
 
 // Match clause: completed bills, optionally within an IST date range.
 const salesMatch = (query = {}) => {
-  const match = { status: 'completed' };
-  if (query.from || query.to) {
-    match.createdAt = {};
-    if (query.from) match.createdAt.$gte = istDayStart(query.from);
-    if (query.to) match.createdAt.$lte = istDayEnd(query.to);
-  }
-  return match;
+  const createdAt = istRangeFilter(query);
+  return createdAt ? { status: 'completed', createdAt } : { status: 'completed' };
 };
 
 // Match clause: return records within the same optional IST date range.
 const returnMatch = (query = {}) => {
-  const match = {};
-  if (query.from || query.to) {
-    match.createdAt = {};
-    if (query.from) match.createdAt.$gte = istDayStart(query.from);
-    if (query.to) match.createdAt.$lte = istDayEnd(query.to);
-  }
-  return match;
+  const createdAt = istRangeFilter(query);
+  return createdAt ? { createdAt } : {};
 };
 
 const ZERO_TOTALS = { revenue: 0, bills: 0, itemsSold: 0, discountGiven: 0, taxCollected: 0 };

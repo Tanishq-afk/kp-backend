@@ -5,7 +5,8 @@ import Product from '../models/Product.js';
 import Return from '../models/Return.js';
 import Customer from '../models/Customer.js';
 import ApiError from '../utils/ApiError.js';
-import { COUNTER } from '../config/constants.js';
+import { COUNTER, PRINT_LIST_MAX_ROWS } from '../config/constants.js';
+import { returnListFilter } from './listFilters.js';
 import { getNextSequence, reserveSequenceBlock } from '../utils/sequence.js';
 import { buildBarcodeValue } from '../utils/barcodeGenerator.js';
 import { getPagination, buildPage } from '../utils/paginate.js';
@@ -349,26 +350,7 @@ export const createReturn = async (payload, user) => {
 
 // Returns history (newest first) — date range + text search + pagination.
 export const listReturns = async (query) => {
-  const filter = {};
-  if (query.from || query.to) {
-    filter.createdAt = {};
-    if (query.from) filter.createdAt.$gte = new Date(query.from);
-    if (query.to) {
-      const t = new Date(query.to);
-      t.setHours(23, 59, 59, 999);
-      filter.createdAt.$lte = t;
-    }
-  }
-  if (query.search) {
-    const rx = { $regex: String(query.search).trim(), $options: 'i' };
-    filter.$or = [
-      { returnNumber: rx },
-      { originalBillNumber: rx },
-      { customerName: rx },
-      { customerPhone: rx },
-    ];
-  }
-
+  const filter = returnListFilter(query);
   const { page, limit, skip } = getPagination(query);
   const [items, total] = await Promise.all([
     Return.find(filter)
@@ -379,6 +361,29 @@ export const listReturns = async (query) => {
     Return.countDocuments(filter),
   ]);
   return buildPage(items, total, { page, limit });
+};
+
+// Superadmin print list: the same returns as the history (same filter), newest first.
+// Items are capped at PRINT_LIST_MAX_ROWS; count and total cover every match.
+export const listReturnsForPrint = async (query) => {
+  const filter = returnListFilter(query);
+  const [returns, [totals]] = await Promise.all([
+    Return.find(filter).select('returnNumber originalBillNumber createdAt refundTotal').sort({ createdAt: -1 }).limit(PRINT_LIST_MAX_ROWS).lean(),
+    Return.aggregate([{ $match: filter }, { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$refundTotal' } } }]),
+  ]);
+  const count = totals?.count || 0;
+  return {
+    items: returns.map((r) => ({
+      returnNumber: r.returnNumber,
+      originalBillNumber: r.originalBillNumber,
+      createdAt: r.createdAt,
+      refundTotal: r.refundTotal,
+    })),
+    count,
+    total: totals?.total || 0,
+    truncated: count > returns.length,
+    limit: PRINT_LIST_MAX_ROWS,
+  };
 };
 
 export const getReturn = async (id) => {

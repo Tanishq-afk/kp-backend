@@ -37,6 +37,12 @@ export const list = asyncHandler(async (req, res) => {
   res.json({ success: true, data: items, pagination });
 });
 
+// GET /api/bills/print-list — superadmin: every bill in the filtered range (print).
+export const printList = asyncHandler(async (req, res) => {
+  const data = await billingService.listBillsForPrint(req.query);
+  res.json({ success: true, data });
+});
+
 // GET /api/bills/:id — full bill (auth).
 export const getOne = asyncHandler(async (req, res) => {
   const bill = await billingService.getBill(req.params.id);

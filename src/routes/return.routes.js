@@ -4,6 +4,7 @@ import validate from '../middleware/validate.js';
 import { protect, restrictTo } from '../middleware/auth.middleware.js';
 import { ROLE, PAYMENT_METHODS, DISCOUNT_TYPES } from '../config/constants.js';
 import * as returnController from '../controllers/return.controller.js';
+import { dateRangeValidators } from '../middleware/dateRange.js';
 
 const router = Router();
 
@@ -48,7 +49,15 @@ router.get(
 router.post('/', restrictTo(ROLE.ADMIN), createValidators, validate, returnController.create);
 
 // history (both roles) + detail
-router.get('/', returnController.list);
+router.get('/', dateRangeValidators, validate, returnController.list);
+// superadmin print list (before `/:id`)
+router.get(
+  '/print-list',
+  restrictTo(ROLE.SUPERADMIN),
+  dateRangeValidators,
+  validate,
+  returnController.printList
+);
 router.get(
   '/:id',
   [param('id').isMongoId().withMessage('Invalid return id')],

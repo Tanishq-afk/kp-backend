@@ -88,6 +88,9 @@ export const COUNTER = {
 // matches local business hours rather than UTC.
 export const REPORT_TIMEZONE = 'Asia/Kolkata';
 
+// Hard cap on rows in a printed list; the slip says when a range was truncated.
+export const PRINT_LIST_MAX_ROWS = 500;
+
 // Stock threshold below which an in-stock (>0) product counts as "low stock",
 // for the superadmin stock-overview page and dashboard.
 export const LOW_STOCK_THRESHOLD = 2;

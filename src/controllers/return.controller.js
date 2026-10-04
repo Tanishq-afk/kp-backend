@@ -25,6 +25,12 @@ export const list = asyncHandler(async (req, res) => {
   res.json({ success: true, data: items, pagination });
 });
 
+// GET /api/returns/print-list — superadmin: every return in the filtered range (print).
+export const printList = asyncHandler(async (req, res) => {
+  const data = await returnService.listReturnsForPrint(req.query);
+  res.json({ success: true, data });
+});
+
 // GET /api/returns/:id (auth) — full return detail.
 export const getOne = asyncHandler(async (req, res) => {
   const data = await returnService.getReturn(req.params.id);

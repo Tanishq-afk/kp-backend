@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { query } from 'express-validator';
+import { dateRangeValidators } from '../middleware/dateRange.js';
 import validate from '../middleware/validate.js';
 import { protect, restrictTo } from '../middleware/auth.middleware.js';
 import { ROLE } from '../config/constants.js';
@@ -10,11 +11,8 @@ const router = Router();
 // Dashboards / reports are superadmin-only (oversight).
 router.use(protect, restrictTo(ROLE.SUPERADMIN));
 
-// Shared optional date-range validators (YYYY-MM-DD or ISO).
-const dateRange = [
-  query('from').optional().isISO8601().withMessage('from must be a date (YYYY-MM-DD)'),
-  query('to').optional().isISO8601().withMessage('to must be a date (YYYY-MM-DD)'),
-];
+// Optional IST date-range validators (shared with the billing and returns lists).
+const dateRange = dateRangeValidators;
 
 router.get('/summary', dateRange, validate, dashboardController.summary);
 router.get('/report', dateRange, validate, dashboardController.rangeReport);

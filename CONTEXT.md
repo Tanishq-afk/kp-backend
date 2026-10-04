@@ -329,6 +329,13 @@ GET    /api/dashboard/summary                  (superadmin) KPIs + today + count
 GET    /api/dashboard/report                   (superadmin) printable range report (IST):
    total sale, total return, bills, items sold, returned items, net revenue, and
    expenses (reference only, NOT deducted). Same definitions as the day-summary.
+All billing, return and print date ranges are IST calendar days (Asia/Kolkata, UTC+5:30).
+Dates are strict YYYY-MM-DD (src/utils/istDate.js, src/middleware/dateRange.js).
+GET    /api/bills/print-list                   (superadmin) every non-held bill in ?from&to
+   (+ same filters as the bills history: search, paymentStatus, financialYear); no paging.
+   Returns { items:[{billNumber,createdAt,total}], count, total, truncated, limit } (items capped at 500).
+GET    /api/returns/print-list                  (superadmin) every return in ?from&to (+ search); no paging.
+   Returns { items:[{returnNumber,originalBillNumber,createdAt,refundTotal}], count, total, truncated, limit }.
 GET    /api/dashboard/sales/daily              (superadmin) day-wise series (IST, gap-filled)
 GET    /api/dashboard/sales/payment-methods    (superadmin) pie: cash/card/upi
 GET    /api/dashboard/sales/top-products       (superadmin) best sellers

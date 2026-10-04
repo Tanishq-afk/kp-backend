@@ -1,9 +1,4 @@
-import { REPORT_TIMEZONE } from '../config/constants.js';
-
-// 'YYYY-MM-DD' in IST for a given date (matches the pattern used in
-// dashboard.service.js so day/year bucketing stays consistent everywhere).
-const istDateKey = (d = new Date()) =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: REPORT_TIMEZONE }).format(d);
+import { istDateKey } from './istDate.js';
 
 // Indian financial year: Apr 1 - Mar 31. Given a date, returns the label the
 // shop uses, e.g. "2026-27" for anything from 1 Apr 2026 through 31 Mar 2027.

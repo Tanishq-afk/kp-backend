@@ -4,6 +4,7 @@ import validate from '../middleware/validate.js';
 import { protect, restrictTo } from '../middleware/auth.middleware.js';
 import { ROLE, PAYMENT_METHODS, DISCOUNT_TYPES } from '../config/constants.js';
 import * as billingController from '../controllers/billing.controller.js';
+import { dateRangeValidators } from '../middleware/dateRange.js';
 
 const router = Router();
 
@@ -49,13 +50,25 @@ router.post('/', restrictTo(ROLE.ADMIN), saleValidators, validate, billingContro
 // history (both roles)
 router.get(
   '/',
-  [query('financialYear').optional().matches(/^\d{4}-\d{2}$/).withMessage('financialYear must look like "2026-27"')],
+  [
+    query('financialYear').optional().matches(/^\d{4}-\d{2}$/).withMessage('financialYear must look like "2026-27"'),
+    ...dateRangeValidators,
+  ],
   validate,
   billingController.list
 );
 
 // resume a held bill -> finalize
 router.post('/:id/complete', restrictTo(ROLE.ADMIN), [...idParam, ...completeValidators], validate, billingController.completeHeld);
+
+// superadmin print list (before `/:id`)
+router.get(
+  '/print-list',
+  restrictTo(ROLE.SUPERADMIN),
+  dateRangeValidators,
+  validate,
+  billingController.printList
+);
 
 // read one + discard a held bill
 router.get('/:id', idParam, validate, billingController.getOne);
