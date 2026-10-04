@@ -1,5 +1,6 @@
 import User from '../models/User.js';
 import ApiError from '../utils/ApiError.js';
+import { normalizePhone } from '../utils/phone.js';
 import { signToken } from '../utils/jwt.js';
 import { ROLE } from '../config/constants.js';
 
@@ -10,15 +11,18 @@ const toSafeUser = (user) => {
   return obj;
 };
 
-// Validates credentials and returns a signed token + the safe user.
+// Validates credentials and returns a signed token + the safe user. The login ID
+// is the phone number when one is given, otherwise the email.
 // Uses one generic message for both "no such user" and "wrong password" so we
-// don't leak which emails exist.
-export const login = async ({ email, password }) => {
-  const normalizedEmail = String(email).toLowerCase().trim();
-  const user = await User.findOne({ email: normalizedEmail }).select('+password');
+// don't leak which accounts exist.
+export const login = async ({ email, phone, password }) => {
+  const query = phone
+    ? { phone: normalizePhone(phone) }
+    : { email: String(email).toLowerCase().trim() };
+  const user = await User.findOne(query).select('+password');
 
   if (!user || !(await user.comparePassword(password))) {
-    throw new ApiError(401, 'Invalid email or password.');
+    throw new ApiError(401, 'Invalid login ID or password.');
   }
   if (!user.isActive) {
     throw new ApiError(403, 'Your account has been deactivated.');

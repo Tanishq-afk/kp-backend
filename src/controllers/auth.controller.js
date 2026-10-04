@@ -3,8 +3,8 @@ import * as authService from '../services/auth.service.js';
 
 // POST /api/auth/login — exchange credentials for a JWT.
 export const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-  const data = await authService.login({ email, password });
+  const { email, phone, password } = req.body;
+  const data = await authService.login({ email, phone, password });
   res.json({ success: true, data });
 });
 

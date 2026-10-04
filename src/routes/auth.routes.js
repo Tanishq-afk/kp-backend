@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { body } from 'express-validator';
+import { normalizePhone } from '../utils/phone.js';
 import rateLimit from 'express-rate-limit';
 import validate from '../middleware/validate.js';
 import { protect, restrictTo } from '../middleware/auth.middleware.js';
@@ -25,7 +26,20 @@ router.post(
   '/login',
   loginLimiter,
   [
-    body('email').isEmail().withMessage('A valid email is required'),
+    // Log in with a 10-digit phone number (preferred) or an email.
+    body('phone')
+      .optional({ values: 'falsy' })
+      .customSanitizer(normalizePhone)
+      .matches(/^\d{10}$/)
+      .withMessage('Phone must be a 10-digit mobile number'),
+    body('email')
+      .optional({ values: 'falsy' })
+      .isEmail()
+      .withMessage('A valid email is required'),
+    body().custom((_, { req }) => {
+      if (!req.body.phone && !req.body.email) throw new Error('Phone or email is required');
+      return true;
+    }),
     body('password').notEmpty().withMessage('Password is required'),
   ],
   validate,

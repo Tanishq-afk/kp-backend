@@ -32,9 +32,12 @@ const userSchema = new mongoose.Schema(
       enum: ROLES,
       default: ROLE.ADMIN,
     },
+    // 10-digit mobile number; a login ID alongside email (see auth.service login).
     phone: {
       type: String,
       trim: true,
+      unique: true,
+      sparse: true,
     },
     isActive: {
       type: Boolean,
