@@ -217,6 +217,8 @@ A product has exactly one `sizeType`; each `sizes[].size` must belong to it
    - `discountValue`: the raw number entered (e.g. `10` = ₹10 or 10%)
    - `discount`: the resolved rupee amount (percent is computed on the frontend as
      `subtotal × value / 100`; the backend stores/validates the resolved ₹).
+   - Limits: a percent above 100, or a flat amount above the subtotal, is rejected
+     (400) — never silently capped. Applies to sales, held-bill completion and exchanges.
 4. Admin optionally adds **remarks** (stored on the bill).
 5. Admin takes payment (split allowed) and completes the bill.
 

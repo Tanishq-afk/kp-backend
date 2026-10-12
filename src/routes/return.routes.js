@@ -21,7 +21,13 @@ const createValidators = [
   body('newBarcodes.*').optional().isString().trim().notEmpty().withMessage('Invalid barcode code'),
   // money for the new sale + settlement of the net
   body('discountType').optional().isIn(DISCOUNT_TYPES).withMessage(`discountType must be one of: ${DISCOUNT_TYPES.join(', ')}`),
-  body('discountValue').optional().isFloat({ min: 0 }).withMessage('discountValue must be a number >= 0'),
+  body('discountValue')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('discountValue must be a number >= 0')
+    .bail()
+    .custom((v, { req }) => req.body.discountType !== 'percent' || Number(v) <= 100)
+    .withMessage('A percent discount cannot be more than 100%'),
   body('tax').optional().isFloat({ min: 0 }).withMessage('tax must be a number >= 0'),
   body('payments').optional().isArray().withMessage('payments must be an array'),
   body('payments.*.method').isIn(PAYMENT_METHODS).withMessage(`payment method must be one of: ${PAYMENT_METHODS.join(', ')}`),

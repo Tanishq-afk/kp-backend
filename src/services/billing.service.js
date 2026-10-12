@@ -83,10 +83,17 @@ export const computeAmounts = ({
 }) => {
   const subtotal = items.reduce((s, it) => s + it.mrp, 0);
 
-  let discount =
-    discountType === 'percent'
-      ? Math.round((subtotal * (Number(discountValue) || 0)) / 100)
-      : Number(discountValue) || 0;
+  // Reject an impossible discount instead of silently capping it: a % typed as ₹
+  // (e.g. 1620%) would otherwise zero the bill.
+  const value = Number(discountValue) || 0;
+  if (discountType === 'percent' && value > 100) {
+    throw new ApiError(400, `A percent discount cannot be more than 100% (got ${value}%).`);
+  }
+  if (discountType !== 'percent' && value > subtotal) {
+    throw new ApiError(400, `Discount ₹${value} is more than the bill amount ₹${subtotal}.`);
+  }
+
+  let discount = discountType === 'percent' ? Math.round((subtotal * value) / 100) : value;
   discount = Math.max(0, Math.min(discount, subtotal)); // never more than subtotal
 
   const taxAmt = Number(tax) || 0;
