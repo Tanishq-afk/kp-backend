@@ -156,8 +156,9 @@ parked bills), `customer` (ref, nullable) + `customerName`/`customerPhone`
 (snapshots, inherited from the bill unless overridden),
 `items: [{ barcode (the returned unit), product, productName, articleNumber, size,
 mrp, refundAmount, resellable, labelLost, newBarcode }]`, `refundTotal` (Σ refundAmount),
+`dueAdjusted` (part of refundTotal that cancelled the original bill's unpaid `amountDue`),
 `exchangeBill` (ref, nullable) + `exchangeTotal`, `netAmount`
-(`exchangeTotal − refundTotal`; >0 collect, <0 refund),
+(`exchangeTotal − (refundTotal − dueAdjusted)`; >0 collect, <0 refund),
 `settlement: { direction (collect|refund|even), amount, payments[] }`,
 `remarks`, `status` (`completed`|`void`), `createdBy` (admin).
 - `refundAmount` = the unit's effective price paid = `round(bill.total × mrp / bill.subtotal)`.
@@ -221,6 +222,13 @@ A product has exactly one `sizeType`; each `sizes[].size` must belong to it
 
 **Amounts:** `subtotal = Σ item.mrp`; `total = subtotal − discount + tax`.
 
+**Credit (pending balance):** a direct sale may be completed part-paid. Its unpaid part
+is stored as `Bill.amountDue` (= total − amountPaid, set at completion). A sale with
+`amountDue > 0` requires a customer (name + phone); the return-exchange leg is exempt.
+Customer payments (`DuePayment`) are applied to the customer's open bills oldest first,
+reducing `amountDue` and raising `amountPaid`; overpaying is rejected.
+Bills completed before this rule have `amountDue` 0 and are not in the dues ledger.
+
 **Split payments:** `payments[]` can mix `cash` / `card` / `upi`;
 `amountPaid = Σ payments.amount`. `paymentStatus` (`paid`/`partial`/`unpaid`)
 derives from `amountPaid` vs `total`.
@@ -267,9 +275,12 @@ A customer comes back with items from a past bill. The admin:
    - If new items were scanned, they are sold as a **normal completed Bill** (invoice no.,
      units `sold`, stock decremented). The return credit is applied to it as `appliedCredit`,
      so it reads as fully paid; only the **net** is collected in cash/card/upi.
-   - **Net = exchangeTotal − refundTotal.** `>0` → customer pays (money sits on the exchange
-     bill); `<0` → shop refunds (money recorded on the return's `settlement.payments`);
-     `0` → even. A pure return (no new items) simply refunds `refundTotal`.
+   - **Credit bills:** the return credit first cancels the original bill's unpaid `amountDue`
+     (`dueAdjusted`, no money moves); only the rest is usable. Returning the last sold unit
+     cancels whatever balance is left.
+   - **Net = exchangeTotal − (refundTotal − dueAdjusted).** `>0` → customer pays (money sits on
+     the exchange bill); `<0` → shop refunds (money recorded on the return's
+     `settlement.payments`); `0` → even. A pure return (no new items) refunds the usable credit.
    - When the **last** sold unit of the original bill is returned, that bill flips to `refunded`.
 - Returnability is derived from barcode status, so **partial and repeat returns** just work
   (a returned unit can't be returned again → 409).
@@ -331,6 +342,12 @@ GET    /api/dashboard/report                   (superadmin) printable range repo
    expenses (reference only, NOT deducted). Same definitions as the day-summary.
 All billing, return and print date ranges are IST calendar days (Asia/Kolkata, UTC+5:30).
 Dates are strict YYYY-MM-DD (src/utils/istDate.js, src/middleware/dateRange.js).
+GET    /api/dues/customers                     (admin + superadmin) customers with a pending
+   balance: { items:[{customer,name,phone,due,bills,oldestBillAt}], count, total }.
+GET    /api/dues/customers/:customerId         (admin + superadmin) open bills (oldest first),
+   totalDue and payment history.
+POST   /api/dues/payments                      (admin) { customer, amount, method, reference? }
+   -> DuePayment with allocations; 400 if amount is more than the customer's total due.
 GET    /api/bills/print-list                   (superadmin) every non-held bill in ?from&to
    (+ same filters as the bills history: search, paymentStatus, financialYear); no paging.
    Returns { items:[{billNumber,createdAt,total}], count, total, truncated, limit } (items capped at 500).
@@ -338,6 +355,7 @@ GET    /api/returns/print-list                  (superadmin) every return in ?fr
    Returns { items:[{returnNumber,originalBillNumber,createdAt,refundTotal}], count, total, truncated, limit }.
 GET    /api/dashboard/sales/daily              (superadmin) day-wise series (IST, gap-filled)
 GET    /api/dashboard/sales/payment-methods    (superadmin) pie: cash/card/upi
+   (counter payments + credit dues received in range)
 GET    /api/dashboard/sales/top-products       (superadmin) best sellers
 GET    /api/dashboard/sales/by-category        (superadmin) pie: sales by category
    (all accept optional ?from=YYYY-MM-DD&to=YYYY-MM-DD)
@@ -347,6 +365,10 @@ GET    /api/reports/day-summary                (admin + superadmin) full single-
    collected by method, returns/refunds, net, and the day's bill + return lists
    (for a printable receipt). Unlike /api/dashboard (oversight-only), both roles read.
    Also returns `expenses {total,count,items}` — informational, NOT part of `net`.
+   Credit: `sales.creditGiven` (left unpaid at the counter that day; fixed),
+   `sales.creditPending` (of that, still owed now), `duesIn` by method +
+   `duesCollected` + `duesList` (dues received today). `totalCollected` and `net.inDrawer`
+   include dues received.
 
 POST   /api/expenses            (admin + superadmin) { reason, amount }
 GET    /api/expenses            (admin + superadmin) list + `totalAmount`, ?from&to&page&limit

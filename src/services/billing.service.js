@@ -155,6 +155,11 @@ const buildBillFields = (payload, items, amounts, customer, user) => ({
   createdBy: user._id,
 });
 
+// Unpaid part of a sale (0 when paid in full or over-paid).
+const balanceOf = (amounts) => Math.max(0, amounts.total - amounts.amountPaid);
+
+const CREDIT_NEEDS_CUSTOMER = 'A pending balance needs a customer (name and phone) so it can be tracked.';
+
 // The transactional core of a completed sale, bound to an existing session so it
 // can join a larger transaction (e.g. the exchange leg of a return). Validates
 // scans, assigns the invoice number, marks units sold, and decrements stock.
@@ -164,10 +169,13 @@ export const completeSaleInSession = async (
   customer,
   session,
   user,
-  { appliedCredit = 0, returnRef = null } = {}
+  { appliedCredit = 0, returnRef = null, requireCustomerForBalance = false } = {}
 ) => {
   const { items, barcodeDocs } = await resolveByCodes(payload.barcodes, session);
   const amounts = computeAmounts({ items, ...payload, appliedCredit });
+  if (requireCustomerForBalance && balanceOf(amounts) > 0 && !customer) {
+    throw new ApiError(400, CREDIT_NEEDS_CUSTOMER);
+  }
   const financialYear = getFinancialYear();
   const seq = await getNextSequence(billCounterKey(financialYear), { session });
 
@@ -180,6 +188,8 @@ export const completeSaleInSession = async (
         appliedCredit,
         returnRef,
         ...buildBillFields(payload, items, amounts, customer, user),
+        // Owed only once the sale is completed; held bills owe nothing yet.
+        amountDue: balanceOf(amounts),
       },
     ],
     { session }
@@ -199,7 +209,9 @@ export const createBill = async (payload, user) => {
   let billId;
   try {
     await session.withTransaction(async () => {
-      const bill = await completeSaleInSession(payload, customer, session, user);
+      const bill = await completeSaleInSession(payload, customer, session, user, {
+        requireCustomerForBalance: true,
+      });
       billId = bill._id;
     });
   } finally {
@@ -276,6 +288,8 @@ export const completeHeldBill = async (id, payload, user) => {
       held.amountPaid = amounts.amountPaid;
       held.changeReturned = amounts.changeReturned;
       held.paymentStatus = amounts.paymentStatus;
+      held.amountDue = balanceOf(amounts);
+      if (held.amountDue > 0 && !held.customer) throw new ApiError(400, CREDIT_NEEDS_CUSTOMER);
       if (payload.remarks !== undefined) held.remarks = payload.remarks;
 
       await held.save({ session });

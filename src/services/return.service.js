@@ -25,6 +25,9 @@ const formatReturnNumber = (seq) => `RET-${String(seq).padStart(6, '0')}`;
 const effectiveRefund = (bill, mrp) =>
   bill.subtotal > 0 ? Math.round((bill.total * mrp) / bill.subtotal) : 0;
 
+// Money is kept to paise so repeated subtraction never drifts.
+const money = (n) => Math.round(n * 100) / 100;
+
 // Lookup step 1: completed bills matching a bill number or customer phone/name.
 // Thin wrapper over billing history, pinned to completed (only these have
 // returnable units — a fully-returned bill is 'refunded' and excluded).
@@ -79,6 +82,7 @@ export const getReturnableItems = async (billId) => {
       subtotal: bill.subtotal,
       discount: bill.discount,
       total: bill.total,
+      amountDue: bill.amountDue || 0,
       createdAt: bill.createdAt,
     },
     items,
@@ -254,6 +258,16 @@ export const createReturn = async (payload, user) => {
       }
       await restock(resellables, session);
 
+      // 5b. A credit bill's unpaid balance is cancelled first: the customer never
+      //     paid that part, so it can't be refunded or spent on an exchange. Once
+      //     no sold unit remains, any balance left (rounding) is cancelled too.
+      const stillSold = await Barcode.findOne({ bill: bill._id, status: 'sold' })
+        .select('_id')
+        .session(session);
+      const owed = bill.amountDue || 0;
+      const dueAdjusted = stillSold ? Math.min(owed, refundTotal) : owed;
+      const credit = money(Math.max(0, refundTotal - dueAdjusted));
+
       // 6. Optional exchange: sell scanned-in items as a normal bill. The net
       //    decides where money sits: a collect's cash goes on the exchange bill;
       //    a refund-out is recorded on the return's settlement.
@@ -269,8 +283,8 @@ export const createReturn = async (payload, user) => {
           discountValue: payload.discountValue,
           tax: payload.tax,
         });
-        const appliedCredit = Math.min(refundTotal, provisional.total);
-        const collecting = provisional.total - refundTotal > 0;
+        const appliedCredit = Math.min(credit, provisional.total);
+        const collecting = provisional.total - credit > 0;
         const collectPayments = collecting ? payload.payments || [] : [];
         settlementPayments = collecting ? [] : payload.payments || [];
 
@@ -292,7 +306,7 @@ export const createReturn = async (payload, user) => {
       }
 
       // 7. Net + settlement direction.
-      const netAmount = exchangeTotal - refundTotal;
+      const netAmount = money(exchangeTotal - credit);
       let direction = 'even';
       if (netAmount > 0) direction = 'collect';
       else if (netAmount < 0) direction = 'refund';
@@ -312,6 +326,7 @@ export const createReturn = async (payload, user) => {
             customerPhone: customer?.phone || bill.customerPhone,
             items,
             refundTotal,
+            dueAdjusted,
             exchangeBill: exchangeBill?._id || null,
             exchangeTotal,
             netAmount,
@@ -332,14 +347,14 @@ export const createReturn = async (payload, user) => {
         );
       }
 
-      // 9. If no sold unit of the original bill remains, mark it refunded.
-      const stillSold = await Barcode.findOne({ bill: bill._id, status: 'sold' })
-        .select('_id')
-        .session(session);
-      if (!stillSold) {
-        bill.status = 'refunded';
-        await bill.save({ session });
+      // 9. Reduce the original bill's balance, and mark it refunded once no sold
+      //    unit remains.
+      if (dueAdjusted > 0) {
+        bill.amountDue = money(owed - dueAdjusted);
+        if (bill.amountDue === 0) bill.paymentStatus = 'paid';
       }
+      if (!stillSold) bill.status = 'refunded';
+      if (dueAdjusted > 0 || !stillSold) await bill.save({ session });
     });
   } finally {
     await session.endSession();

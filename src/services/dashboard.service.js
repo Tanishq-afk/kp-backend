@@ -4,6 +4,7 @@ import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import Return from '../models/Return.js';
 import Expense from '../models/Expense.js';
+import DuePayment from '../models/DuePayment.js';
 import { REPORT_TIMEZONE, ROLE, LOW_STOCK_THRESHOLD } from '../config/constants.js';
 import ApiError from '../utils/ApiError.js';
 import { istDayStart, istDayEnd, istDateKey, istRangeFilter } from '../utils/istDate.js';
@@ -151,15 +152,29 @@ export const getDailySales = async (query) => {
   return filled;
 };
 
-// Split of collected money by payment method (pie chart).
+// Split of collected money by payment method (pie chart): payments taken at the
+// counter plus credit dues collected later (by when they were received).
 export const getPaymentMethodBreakdown = async (query) => {
-  return Bill.aggregate([
-    { $match: salesMatch(query) },
-    { $unwind: '$payments' },
-    { $group: { _id: '$payments.method', amount: { $sum: '$payments.amount' }, count: { $sum: 1 } } },
-    { $project: { _id: 0, method: '$_id', amount: 1, count: 1 } },
-    { $sort: { amount: -1 } },
+  const receivedAt = istRangeFilter(query);
+  const [sale, dues] = await Promise.all([
+    Bill.aggregate([
+      { $match: salesMatch(query) },
+      { $unwind: '$payments' },
+      { $group: { _id: '$payments.method', amount: { $sum: '$payments.amount' }, count: { $sum: 1 } } },
+    ]),
+    DuePayment.aggregate([
+      { $match: receivedAt ? { receivedAt } : {} },
+      { $group: { _id: '$method', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
   ]);
+  const byMethod = new Map();
+  for (const r of [...sale, ...dues]) {
+    const cur = byMethod.get(r._id) || { method: r._id, amount: 0, count: 0 };
+    cur.amount += r.amount;
+    cur.count += r.count;
+    byMethod.set(r._id, cur);
+  }
+  return [...byMethod.values()].sort((a, b) => b.amount - a.amount);
 };
 
 // Best sellers by gross revenue (sum of item MRP) and units sold.
@@ -382,7 +397,10 @@ export const getDaySummary = async (query = {}) => {
   // gross sales reflect what was actually billed. Exchanges are real sales too.
   const saleFilter = { status: { $in: ['completed', 'refunded'] }, createdAt: inDay };
 
-  const [salesAgg, paymentsAgg, returnsAgg, returnItemsAgg, refundsAgg, billsList, returnsList, expensesList] =
+  const [
+    salesAgg, paymentsAgg, returnsAgg, returnItemsAgg, refundsAgg, billsList, returnsList, expensesList,
+    duesAgg, duesList,
+  ] =
     await Promise.all([
       Bill.aggregate([
         { $match: saleFilter },
@@ -394,6 +412,15 @@ export const getDaySummary = async (query = {}) => {
             discount: { $sum: '$discount' },
             tax: { $sum: '$tax' },
             itemsSold: { $sum: { $size: '$items' } },
+            // Sold on credit: what was left unpaid at the counter. Read from the
+            // sale-time payments, which later dues payments never change.
+            creditGiven: {
+              $sum: {
+                $max: [0, { $subtract: ['$total', { $add: [{ $sum: '$payments.amount' }, { $ifNull: ['$appliedCredit', 0] }] }] }],
+              },
+            },
+            // Of that credit, what is still owed now (falls as dues are collected).
+            creditPending: { $sum: { $ifNull: ['$amountDue', 0] } },
           },
         },
       ]),
@@ -434,15 +461,28 @@ export const getDaySummary = async (query = {}) => {
         .sort({ createdAt: 1 })
         .lean(),
       Return.find({ createdAt: inDay })
-        .select('returnNumber originalBillNumber customerName refundTotal exchangeTotal netAmount settlement.direction createdAt')
+        .select('returnNumber originalBillNumber customerName refundTotal dueAdjusted exchangeTotal netAmount settlement.direction createdAt')
         .sort({ createdAt: 1 })
         .lean(),
       Expense.find({ createdAt: inDay }).select('reason amount createdAt').sort({ createdAt: 1 }).lean(),
+      DuePayment.aggregate([
+        { $match: { receivedAt: inDay } },
+        { $group: { _id: '$method', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+        { $project: { _id: 0, method: '$_id', amount: 1, count: 1 } },
+        { $sort: { amount: -1 } },
+      ]),
+      DuePayment.find({ receivedAt: inDay })
+        .populate('customer', 'name')
+        .select('customer amount method allocations receivedAt')
+        .sort({ receivedAt: 1 })
+        .lean(),
     ]);
 
-  const sales = { bills: 0, gross: 0, discount: 0, tax: 0, itemsSold: 0, ...(salesAgg[0] || {}) };
+  const sales = { bills: 0, gross: 0, discount: 0, tax: 0, itemsSold: 0, creditGiven: 0, creditPending: 0, ...(salesAgg[0] || {}) };
   delete sales._id;
-  const totalCollected = paymentsAgg.reduce((s, p) => s + p.amount, 0);
+  const duesCollected = duesAgg.reduce((s, p) => s + p.amount, 0);
+  // Everything received today: at the counter plus credit dues collected.
+  const totalCollected = paymentsAgg.reduce((s, p) => s + p.amount, 0) + duesCollected;
 
   const returns = {
     count: 0, refundTotal: 0, exchangeTotal: 0, itemsReturned: 0, exchanges: 0,
@@ -457,6 +497,8 @@ export const getDaySummary = async (query = {}) => {
     date,
     sales,
     paymentsIn: paymentsAgg,
+    duesIn: duesAgg,
+    duesCollected,
     totalCollected,
     returns,
     refundsOut: refundsAgg,
@@ -480,11 +522,19 @@ export const getDaySummary = async (query = {}) => {
       count: expensesList.length,
       items: expensesList.map((e) => ({ _id: e._id, reason: e.reason, amount: e.amount, createdAt: e.createdAt })),
     },
+    duesList: duesList.map((d) => ({
+      customerName: d.customer?.name || null,
+      amount: d.amount,
+      method: d.method,
+      billNumbers: (d.allocations || []).map((a) => a.billNumber),
+      receivedAt: d.receivedAt,
+    })),
     returnsList: returnsList.map((r) => ({
       returnNumber: r.returnNumber,
       originalBillNumber: r.originalBillNumber,
       customerName: r.customerName || null,
       refundTotal: r.refundTotal,
+      dueAdjusted: r.dueAdjusted || 0,
       exchangeTotal: r.exchangeTotal,
       netAmount: r.netAmount,
       direction: r.settlement?.direction,
