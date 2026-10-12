@@ -107,6 +107,9 @@ const billSchema = new mongoose.Schema(
       default: null,
     },
     amountPaid: { type: Number, default: 0, min: 0 }, // sum of payments + appliedCredit
+    // Unpaid part of the total on a credit sale. Set at completion and reduced by
+    // customer payments (see DuePayment). 0 for fully paid bills.
+    amountDue: { type: Number, default: 0, min: 0 },
     changeReturned: { type: Number, default: 0, min: 0 },
     paymentStatus: {
       type: String,
@@ -146,6 +149,12 @@ billSchema.index(
 
 // Drives the held-bills list and the billing history (newest first).
 billSchema.index({ status: 1, createdAt: -1 });
+
+// Drives the dues ledger: only bills that still have a balance are indexed.
+billSchema.index(
+  { customer: 1, createdAt: 1 },
+  { partialFilterExpression: { amountDue: { $gt: 0 } } }
+);
 
 const Bill = mongoose.model('Bill', billSchema);
 
