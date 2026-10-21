@@ -8,8 +8,8 @@ import {
 
 // A single line on a bill = one scanned barcode (physical unit). Product
 // details are snapshotted so historical bills never change if a product is
-// later edited or deleted. The unit's MRP is its line price; any discount is
-// applied at the bill level (see discountType/discountValue below).
+// later edited or deleted. The unit's MRP is its line price; a discount is either
+// per item (fields on the line) or bill-level (discountType/discountValue below).
 const billItemSchema = new mongoose.Schema(
   {
     barcode: {
@@ -25,6 +25,14 @@ const billItemSchema = new mongoose.Schema(
     articleNumber: { type: String },
     size: { type: String },
     mrp: { type: Number, required: true }, // selling price of this unit
+    // Item-wise discount on this unit (an alternative to the bill-level discount;
+    // a bill uses one or the other). `discount` is the resolved ₹ and
+    // `netPrice` = mrp - discount. Bills from before item discounts have no
+    // netPrice; read it as `netPrice ?? mrp`.
+    discountType: { type: String, enum: DISCOUNT_TYPES, default: 'flat' },
+    discountValue: { type: Number, default: 0, min: 0 },
+    discount: { type: Number, default: 0, min: 0 },
+    netPrice: { type: Number, min: 0 },
   },
   { _id: false }
 );
@@ -86,7 +94,9 @@ const billSchema = new mongoose.Schema(
     // Bill-level discount. `discountType` says whether the admin entered a flat
     // rupee amount or a percentage; `discountValue` is that raw entered number
     // (e.g. 10 => ₹10 or 10%); `discount` is the resolved rupee amount actually
-    // applied (for percent it = round(subtotal * discountValue / 100)).
+    // applied (for percent it = round(subtotal * discountValue / 100)). On a bill
+    // that uses item discounts, discountType/discountValue stay flat/0 and
+    // `discount` is the sum of the item discounts.
     discountType: { type: String, enum: DISCOUNT_TYPES, default: 'flat' },
     discountValue: { type: Number, default: 0, min: 0 },
     discount: { type: Number, default: 0, min: 0 }, // resolved discount in ₹

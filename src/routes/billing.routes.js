@@ -21,6 +21,10 @@ const moneyValidators = [
     .bail()
     .custom((v, { req }) => req.body.discountType !== 'percent' || Number(v) <= 100)
     .withMessage('A percent discount cannot be more than 100%'),
+  body('itemDiscounts').optional().isArray().withMessage('itemDiscounts must be an array'),
+  body('itemDiscounts.*.code').isString().trim().notEmpty().withMessage('Each item discount needs the item barcode'),
+  body('itemDiscounts.*.discountType').optional().isIn(DISCOUNT_TYPES).withMessage(`Item discountType must be one of: ${DISCOUNT_TYPES.join(', ')}`),
+  body('itemDiscounts.*.discountValue').isFloat({ min: 0 }).withMessage('Item discount must be a number >= 0'),
   body('tax').optional().isFloat({ min: 0 }).withMessage('tax must be a number >= 0'),
   body('payments').optional().isArray().withMessage('payments must be an array'),
   body('payments.*.method').isIn(PAYMENT_METHODS).withMessage(`payment method must be one of: ${PAYMENT_METHODS.join(', ')}`),

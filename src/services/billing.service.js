@@ -70,6 +70,37 @@ const resolveByIds = async (ids, session) => {
   return { items: found.map(toItem), barcodeDocs: found };
 };
 
+// Resolve one unit's item-wise discount (₹ or %) into `discount` and `netPrice`.
+// Impossible values are rejected, never capped (same rule as the bill discount).
+const applyItemDiscount = (item, d) => {
+  const discountType = d?.discountType === 'percent' ? 'percent' : 'flat';
+  const discountValue = Number(d?.discountValue) || 0;
+  if (discountValue < 0) throw new ApiError(400, `${item.productName}: discount cannot be negative.`);
+  if (discountType === 'percent' && discountValue > 100) {
+    throw new ApiError(400, `${item.productName}: a percent discount cannot be more than 100% (got ${discountValue}%).`);
+  }
+  if (discountType === 'flat' && discountValue > item.mrp) {
+    throw new ApiError(400, `${item.productName}: discount ₹${discountValue} is more than its price ₹${item.mrp}.`);
+  }
+  const discount = discountType === 'percent' ? Math.round((item.mrp * discountValue) / 100) : discountValue;
+  return { ...item, discountType, discountValue, discount, netPrice: item.mrp - discount };
+};
+
+// Attach item discounts to resolved items. `itemDiscounts` = [{ code, discountType,
+// discountValue }] keyed by barcode code; every code must be one of the scanned units.
+// `fallback(barcodeDoc)` supplies a discount for units the payload doesn't mention
+// (a held bill keeps the discounts it was parked with).
+export const withItemDiscounts = (items, barcodeDocs, itemDiscounts, fallback) => {
+  const byCode = new Map((itemDiscounts || []).map((d) => [String(d.code).trim(), d]));
+  const scanned = new Set(barcodeDocs.map((b) => b.code));
+  const stray = [...byCode.keys()].filter((c) => !scanned.has(c));
+  if (stray.length) throw new ApiError(400, `Discount given for an item not on this bill: ${stray.join(', ')}`);
+  return items.map((it, i) => {
+    const doc = barcodeDocs[i];
+    return applyItemDiscount(it, byCode.get(doc.code) ?? fallback?.(doc));
+  });
+};
+
 // Compute money fields from items + discount/tax/payments. `appliedCredit` is
 // return-credit tendered toward the bill (0 for a normal sale); it counts toward
 // amountPaid alongside real payments so an exchange bill reads as fully paid.
@@ -82,10 +113,14 @@ export const computeAmounts = ({
   appliedCredit = 0,
 }) => {
   const subtotal = items.reduce((s, it) => s + it.mrp, 0);
+  const itemDiscount = items.reduce((s, it) => s + (it.discount || 0), 0);
 
   // Reject an impossible discount instead of silently capping it: a % typed as ₹
   // (e.g. 1620%) would otherwise zero the bill.
   const value = Number(discountValue) || 0;
+  if (itemDiscount > 0 && value > 0) {
+    throw new ApiError(400, 'Use either item discounts or a bill discount, not both.');
+  }
   if (discountType === 'percent' && value > 100) {
     throw new ApiError(400, `A percent discount cannot be more than 100% (got ${value}%).`);
   }
@@ -94,6 +129,7 @@ export const computeAmounts = ({
   }
 
   let discount = discountType === 'percent' ? Math.round((subtotal * value) / 100) : value;
+  if (itemDiscount > 0) discount = itemDiscount;
   discount = Math.max(0, Math.min(discount, subtotal)); // never more than subtotal
 
   const taxAmt = Number(tax) || 0;
@@ -178,7 +214,9 @@ export const completeSaleInSession = async (
   user,
   { appliedCredit = 0, returnRef = null, requireCustomerForBalance = false } = {}
 ) => {
-  const { items, barcodeDocs } = await resolveByCodes(payload.barcodes, session);
+  const resolved = await resolveByCodes(payload.barcodes, session);
+  const { barcodeDocs } = resolved;
+  const items = withItemDiscounts(resolved.items, barcodeDocs, payload.itemDiscounts);
   const amounts = computeAmounts({ items, ...payload, appliedCredit });
   if (requireCustomerForBalance && balanceOf(amounts) > 0 && !customer) {
     throw new ApiError(400, CREDIT_NEEDS_CUSTOMER);
@@ -231,7 +269,8 @@ export const createBill = async (payload, user) => {
 // invoice number and makes NO stock change (units stay available).
 export const holdBill = async (payload, user) => {
   const customer = await resolveCustomer(payload.customer, user, payload.remarks);
-  const { items } = await resolveByCodes(payload.barcodes);
+  const resolved = await resolveByCodes(payload.barcodes);
+  const items = withItemDiscounts(resolved.items, resolved.barcodeDocs, payload.itemDiscounts);
   const amounts = computeAmounts({ items, ...payload });
   const seq = await getNextSequence(COUNTER.HOLD);
 
@@ -261,10 +300,20 @@ export const completeHeldBill = async (id, payload, user) => {
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      const { items, barcodeDocs } =
-        Array.isArray(payload.barcodes) && payload.barcodes.length
-          ? await resolveByCodes(payload.barcodes, session)
-          : await resolveByIds(held.items.map((it) => it.barcode), session);
+      const rescanned = Array.isArray(payload.barcodes) && payload.barcodes.length;
+      const resolved = rescanned
+        ? await resolveByCodes(payload.barcodes, session)
+        : await resolveByIds(held.items.map((it) => it.barcode), session);
+      const { barcodeDocs } = resolved;
+      // Kept items carry the discounts they were held with, unless the payload
+      // sends new ones (a re-scanned cart only uses the payload's).
+      const heldDiscount = new Map(held.items.map((it) => [String(it.barcode), it]));
+      const items = withItemDiscounts(
+        resolved.items,
+        barcodeDocs,
+        payload.itemDiscounts,
+        rescanned || payload.itemDiscounts ? undefined : (doc) => heldDiscount.get(String(doc._id))
+      );
 
       const discountType = payload.discountType ?? held.discountType;
       const discountValue = payload.discountValue ?? held.discountValue;

@@ -13,6 +13,7 @@ import { getPagination, buildPage } from '../utils/paginate.js';
 import {
   listBills,
   resolveByCodes,
+  withItemDiscounts,
   computeAmounts,
   completeSaleInSession,
   resolveCustomer,
@@ -20,10 +21,16 @@ import {
 
 const formatReturnNumber = (seq) => `RET-${String(seq).padStart(6, '0')}`;
 
-// The amount actually paid for one unit on a bill: its MRP share of the bill
-// total, so a bill-level discount/tax is refunded proportionally.
-const effectiveRefund = (bill, mrp) =>
-  bill.subtotal > 0 ? Math.round((bill.total * mrp) / bill.subtotal) : 0;
+// A unit's price after its item discount (older bills have no netPrice: MRP).
+const linePrice = (it) => it.netPrice ?? it.mrp;
+
+// The amount actually paid for one unit on a bill: its share of the bill total
+// by line price, so item discounts, a bill-level discount and tax are all
+// refunded proportionally.
+const effectiveRefund = (bill, item) => {
+  const base = bill.items.reduce((s, it) => s + linePrice(it), 0);
+  return base > 0 ? Math.round((bill.total * linePrice(item)) / base) : 0;
+};
 
 // Money is kept to paise so repeated subtraction never drifts.
 const money = (n) => Math.round(n * 100) / 100;
@@ -65,7 +72,8 @@ export const getReturnableItems = async (billId) => {
       articleNumber: it.articleNumber,
       size: it.size,
       mrp: it.mrp,
-      refundAmount: effectiveRefund(bill, it.mrp),
+      netPrice: linePrice(it),
+      refundAmount: effectiveRefund(bill, it),
       returnable: returnableReason === null,
       returnableReason,
     };
@@ -206,7 +214,8 @@ export const createReturn = async (payload, user) => {
 
       // 3. Build return items + refund amounts.
       const items = resolved.map(({ barcode, resellable, labelLost }) => {
-        const mrp = billItemByBarcode.get(String(barcode._id))?.mrp ?? barcode.mrp;
+        const billItem = billItemByBarcode.get(String(barcode._id));
+        const mrp = billItem?.mrp ?? barcode.mrp;
         return {
           barcode: barcode._id,
           product: barcode.product,
@@ -214,7 +223,7 @@ export const createReturn = async (payload, user) => {
           articleNumber: barcode.articleNumber,
           size: barcode.size,
           mrp,
-          refundAmount: effectiveRefund(bill, mrp),
+          refundAmount: effectiveRefund(bill, billItem ?? { mrp }),
           resellable,
           labelLost,
           newBarcode: null,
@@ -276,7 +285,8 @@ export const createReturn = async (payload, user) => {
       let settlementPayments = payload.payments || []; // default: refund-out (no exchange)
 
       if (hasExchange) {
-        const { items: newItems } = await resolveByCodes(newBarcodes, session);
+        const resolvedNew = await resolveByCodes(newBarcodes, session);
+        const newItems = withItemDiscounts(resolvedNew.items, resolvedNew.barcodeDocs, payload.itemDiscounts);
         const provisional = computeAmounts({
           items: newItems,
           discountType: payload.discountType,
@@ -291,6 +301,7 @@ export const createReturn = async (payload, user) => {
         exchangeBill = await completeSaleInSession(
           {
             barcodes: newBarcodes,
+            itemDiscounts: payload.itemDiscounts,
             discountType: payload.discountType,
             discountValue: payload.discountValue,
             tax: payload.tax,
