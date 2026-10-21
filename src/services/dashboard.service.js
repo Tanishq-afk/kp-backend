@@ -232,6 +232,7 @@ export const getStockSummary = async () => {
         totalUnitsInStock: { $sum: '$currentStock' },
         inventoryCostValue: { $sum: { $multiply: ['$currentStock', '$costPrice'] } },
         inventoryRetailValue: { $sum: { $multiply: ['$currentStock', '$mrp'] } },
+        inStock: { $sum: { $cond: [{ $gt: ['$currentStock', 0] }, 1, 0] } },
         outOfStock: { $sum: { $cond: [{ $eq: ['$currentStock', 0] }, 1, 0] } },
         lowStock: {
           $sum: {
@@ -250,6 +251,7 @@ export const getStockSummary = async () => {
     totalUnitsInStock: agg?.totalUnitsInStock || 0,
     inventoryCostValue: agg?.inventoryCostValue || 0,
     inventoryRetailValue: agg?.inventoryRetailValue || 0,
+    inStock: agg?.inStock || 0,
     outOfStock: agg?.outOfStock || 0,
     lowStock: agg?.lowStock || 0,
   };
