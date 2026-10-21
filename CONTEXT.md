@@ -139,7 +139,9 @@ Linked from Bill.
 `billNumber` (assigned on completion; null while held — partial-unique index),
 `status` (`held`|`completed`|`cancelled`|`refunded`), `holdRef` + `heldAt` (for
 parked bills), `customer` (ref, nullable) + `customerName`/`customerPhone`
-(snapshots), `items: [{ barcode, product, productName, articleNumber, size, mrp }]`
+(snapshots), `items: [{ barcode, product, productName, articleNumber, size, mrp, discountType,
+discountValue, discount, netPrice }]` (item-wise discount; older bills lack `netPrice`
+— read as `netPrice ?? mrp`)
 (snapshots; mrp = line price), `subtotal`,
 `discountType` (`flat`|`percent`) + `discountValue` (raw) + `discount` (resolved ₹),
 `tax`, `total`, `payments: [{ method, amount, reference }]` (split payments),
@@ -219,6 +221,13 @@ A product has exactly one `sizeType`; each `sizes[].size` must belong to it
      `subtotal × value / 100`; the backend stores/validates the resolved ₹).
    - Limits: a percent above 100, or a flat amount above the subtotal, is rejected
      (400) — never silently capped. Applies to sales, held-bill completion and exchanges.
+   - **Item-wise discount** (alternative): `itemDiscounts: [{ code, discountType,
+     discountValue }]` alongside `barcodes`. Per unit: ≤100% or ≤ its MRP. A bill uses
+     item discounts OR a bill discount, never both (400). With item discounts the bill's
+     `discount` = Σ item discounts and discountType/discountValue stay flat/0. A held
+     bill keeps its item discounts on completion unless new ones are sent.
+   - Returns refund each unit's share of the bill total by line price (`netPrice ?? mrp`);
+     top-products / by-category revenue also use the line price.
 4. Admin optionally adds **remarks** (stored on the bill).
 5. Admin takes payment (split allowed) and completes the bill.
 

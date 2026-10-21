@@ -177,7 +177,7 @@ export const getPaymentMethodBreakdown = async (query) => {
   return [...byMethod.values()].sort((a, b) => b.amount - a.amount);
 };
 
-// Best sellers by gross revenue (sum of item MRP) and units sold.
+// Best sellers by revenue (sum of item price after item discounts) and units sold.
 export const getTopProducts = async (query, limit = 10) => {
   return Bill.aggregate([
     { $match: salesMatch(query) },
@@ -188,7 +188,7 @@ export const getTopProducts = async (query, limit = 10) => {
         productName: { $first: '$items.productName' },
         articleNumber: { $first: '$items.articleNumber' },
         qty: { $sum: 1 },
-        revenue: { $sum: '$items.mrp' },
+        revenue: { $sum: { $ifNull: ['$items.netPrice', '$items.mrp'] } },
       },
     },
     { $sort: { revenue: -1 } },
@@ -197,13 +197,13 @@ export const getTopProducts = async (query, limit = 10) => {
   ]);
 };
 
-// Gross sales grouped by category (pie chart). Resolves category via the
+// Sales (after item discounts) grouped by category (pie chart). Resolves category via the
 // product (products with sales can't be deleted, so the lookup always hits).
 export const getSalesByCategory = async (query) => {
   return Bill.aggregate([
     { $match: salesMatch(query) },
     { $unwind: '$items' },
-    { $group: { _id: '$items.product', qty: { $sum: 1 }, revenue: { $sum: '$items.mrp' } } },
+    { $group: { _id: '$items.product', qty: { $sum: 1 }, revenue: { $sum: { $ifNull: ['$items.netPrice', '$items.mrp'] } } } },
     { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'p' } },
     { $unwind: { path: '$p', preserveNullAndEmptyArrays: true } },
     { $group: { _id: '$p.category', revenue: { $sum: '$revenue' }, qty: { $sum: '$qty' } } },
