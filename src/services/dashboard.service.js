@@ -1,5 +1,6 @@
 import Bill from '../models/Bill.js';
 import Product from '../models/Product.js';
+import Barcode from '../models/Barcode.js';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import Return from '../models/Return.js';
@@ -223,6 +224,17 @@ export const getSalesByCategory = async (query) => {
 
 // Inventory oversight KPIs (superadmin) — not sales, current stock on hand.
 export const getStockSummary = async () => {
+  // Every physical unit has one barcode, so units are counted from barcodes:
+  // totalUnits = availableUnits + soldUnits. Retired ('returned'/'void') labels
+  // are left out — a resold return is flipped back to 'available' instead.
+  const unitCounts = await Barcode.aggregate([
+    { $match: { status: { $in: ['available', 'sold'] } } },
+    { $group: { _id: '$status', n: { $sum: 1 } } },
+  ]);
+  const units = Object.fromEntries(unitCounts.map((u) => [u._id, u.n]));
+  const availableUnits = units.available || 0;
+  const soldUnits = units.sold || 0;
+
   const [agg] = await Product.aggregate([
     { $match: { isActive: true } },
     {
@@ -248,6 +260,9 @@ export const getStockSummary = async () => {
   ]);
   return {
     totalProducts: agg?.totalProducts || 0,
+    totalUnits: availableUnits + soldUnits,
+    availableUnits,
+    soldUnits,
     totalUnitsInStock: agg?.totalUnitsInStock || 0,
     inventoryCostValue: agg?.inventoryCostValue || 0,
     inventoryRetailValue: agg?.inventoryRetailValue || 0,
